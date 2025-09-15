@@ -1,0 +1,33 @@
+{
+    "name": "tzar/search-engine",
+    "description": "A JSON-tree based fuzzy search engine for Laravel with multi-domain and category filtering.",
+    "keywords": ["laravel", "search", "fuzzy", "autocomplete", "categories", "json"],
+    "type": "library",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Tzar",
+            "email": "your-email@example.com"
+        }
+    ],
+    "require": {
+        "php": "^7.4|^8.0",
+        "illuminate/support": "^8.0|^9.0|^10.0|^11.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Tzar\\SearchEngine\\": "src/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Tzar\\SearchEngine\\SearchServiceProvider"
+            ],
+            "aliases": {
+                "Search": "Tzar\\SearchEngine\\Facades\\Search"
+            }
+        }
+    },
+    "minimum-stability": "stable"
+}
