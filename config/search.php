@@ -1,7 +1,5 @@
 <?php
 
-<?php
-
 return [
 
     /*
@@ -19,7 +17,7 @@ return [
     'models' => [
         // set your app models here
         'term'     => App\Models\Term::class,
-        'category' => App\Models\Category::class,
+        'category' => App\Models\Category::class, // optional, only if using category filters
     ],
 
     /*
@@ -30,8 +28,8 @@ return [
     | the package will build a single global tree (tree_all.json).
     */
     'columns' => [
-        'term_id'    => 'id',
-        'term_title' => 'title',
+        'term_id'    => 'id',  // primary key (can be uuid in some cases)
+        'term_title' => 'title', // main searchable column 'title' in given model
         'term_type'  => 'type',      // dynamic column for type (can be null)
         'domain_id'  => 'domain_id', // set null if not used
     ],
@@ -44,7 +42,7 @@ return [
     'search' => [
         'fuzzy_threshold'   => 2,      // max levenshtein distance (title vs query)
         'similarity_ratio'  => 40,     // % threshold from similar_text
-        'tree_path'         => storage_path('app/search/trees'),
+        'tree_path'         => storage_path('app/search/trees'), // path to store tree shards
         'branch_distance'   => 1,      // levenshtein distance for nearby branch keys
         'min_candidates'    => 25,     // if fewer candidates, expand to nearby branches
         'token_mode'        => 'any',  // 'any' or 'all' tokens must be present
