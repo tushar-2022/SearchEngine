@@ -12,6 +12,8 @@ class JsonSearchDriver implements SearchDriver
     protected array $columns;
     protected string $termModel;
 
+    protected static $distanceCache = [];
+
     public function __construct(array $fullConfig)
     {
         // fullConfig expected to be config('search') array
@@ -44,48 +46,41 @@ class JsonSearchDriver implements SearchDriver
 
     protected function performSearch(string $query, ?int $domainId, array $options): array
     {
-        $builder = new TreeBuilder($this->termModel, $this->columns, $this->searchCfg);
-        $tree = $builder->load($domainId) ?? $builder->build($domainId);
-
-        // options
-        $minRatio     = $options['min_ratio'] ?? ($this->searchCfg['similarity_ratio'] ?? 40);
-        $maxDistance  = $options['max_distance'] ?? ($this->searchCfg['fuzzy_threshold'] ?? 2);
-        $branchDist   = $options['branch_distance'] ?? ($this->searchCfg['branch_distance'] ?? 1);
-        $minCandidates= $options['min_candidates'] ?? ($this->searchCfg['min_candidates'] ?? 25);
-        $tokenMode    = $options['token_mode'] ?? ($this->searchCfg['token_mode'] ?? 'any');
-        $substrMinLen = $options['substring_min_len'] ?? ($this->searchCfg['substring_min_len'] ?? 3);
-        $substrBoost  = $options['substring_boost'] ?? ($this->searchCfg['substring_boost'] ?? 20);
-        $prefixBoost  = $options['prefix_boost'] ?? ($this->searchCfg['prefix_boost'] ?? 30);
-        $returnFormat = $options['return'] ?? ($this->searchCfg['return'] ?? 'ids');
-
-        $categoryFilter = $options['category_ids'] ?? null;
+        $builder = new TreeBuilder($this->config); // pass full package config
 
         $qLower = mb_strtolower($query);
-        $tokens = $this->tokenize($qLower);
+        $tokens = preg_split('/\s+/', $qLower, -1, PREG_SPLIT_NO_EMPTY);
 
-        // build base keys: token keys first, then phrase key if multi-token
         $baseKeys = [];
         foreach ($tokens as $tok) {
-            if (ctype_digit($tok)) {
-                $baseKeys[] = 'N:' . $tok;
-            } else {
-                $baseKeys[] = 'T:' . metaphone($tok);
-            }
+            $baseKeys[] = ctype_digit($tok) ? 'N:' . $tok : 'T:' . metaphone($tok);
         }
         if (count($tokens) > 1) {
             $baseKeys[] = 'P:' . metaphone($qLower);
         }
 
-        // collect candidates from exact branch keys
-        $seen = [];
         $candidates = [];
+        $seen = [];
 
-        foreach ($baseKeys as $k) {
-            if (!empty($tree[$k])) {
-                foreach ($tree[$k] as $node) {
-                    if ($categoryFilter && !array_intersect($categoryFilter, $node['category_ids'])) {
-                        continue;
-                    }
+        // Lazy load shards only for base keys
+        foreach ($baseKeys as $key) {
+            $prefix = substr($key, 0, 2);
+            $shard = $builder->loadShard($domainId, $prefix);
+
+            foreach ($shard as $node) {
+                if (!isset($seen[$node['id']])) {
+                    $seen[$node['id']] = true;
+                    $candidates[] = $node;
+                }
+            }
+        }
+
+        // Fallback if too few candidates (optional: scan all shards)
+        $minCandidates = $options['min_candidates'] ?? ($this->config['search']['min_candidates'] ?? 25);
+        if (count($candidates) < $minCandidates) {
+            $allShards = $builder->load($domainId);
+            foreach ($allShards as $shard) {
+                foreach ($shard as $node) {
                     if (!isset($seen[$node['id']])) {
                         $seen[$node['id']] = true;
                         $candidates[] = $node;
@@ -94,89 +89,43 @@ class JsonSearchDriver implements SearchDriver
             }
         }
 
-        // Expand to nearby branches if too few candidates
-        if (count($candidates) < $minCandidates && $branchDist > 0) {
-            $allKeys = array_keys($tree);
-            foreach ($baseKeys as $k) {
-                foreach ($allKeys as $ak) {
-                    if (levenshtein($k, $ak) <= $branchDist) {
-                        foreach ($tree[$ak] as $node) {
-                            if ($categoryFilter && !array_intersect($categoryFilter, $node['category_ids'])) {
-                                continue;
-                            }
-                            if (!isset($seen[$node['id']])) {
-                                $seen[$node['id']] = true;
-                                $candidates[] = $node;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // If still empty (edge case), fall back to scanning entire tree (careful: expensive)
-        if (empty($candidates)) {
-            foreach ($tree as $branch) {
-                foreach ($branch as $node) {
-                    if ($categoryFilter && !array_intersect($categoryFilter, $node['category_ids'])) {
-                        continue;
-                    }
-                    if (!isset($seen[$node['id']])) {
-                        $seen[$node['id']] = true;
-                        $candidates[] = $node;
-                    }
-                }
-            }
-        }
-
-        // scoring
+        // Scoring using Damerau-Levenshtein + substring/prefix boosts
         $matches = [];
         foreach ($candidates as $node) {
-            $title = mb_strtolower($node['title']);
-
-            // enforce token_mode = 'all' if requested
-            if ($tokenMode === 'all' && !$this->tokensAllPresent($tokens, $title)) {
-                continue;
-            }
-
-            $distance = levenshtein($qLower, $title);
-            similar_text($qLower, $title, $similarityPct); // percent in $similarityPct
+            $title = mb_strtolower($node['t']);
+            $distance = $this->damerauDistance($qLower, $title);
+            similar_text($qLower, $title, $similarityPct);
 
             $score = $similarityPct - ($distance * 5);
 
-            // substring boost
-            if (mb_strlen($qLower) >= $substrMinLen && mb_strpos($title, $qLower) !== false) {
-                $score += $substrBoost;
+            if (mb_strlen($qLower) >= ($this->config['search']['substring_min_len'] ?? 3) &&
+                mb_strpos($title, $qLower) !== false
+            ) {
+                $score += $this->config['search']['substring_boost'] ?? 20;
             }
 
-            // prefix boost (autocomplete)
-            if (!empty($options['is_autocomplete']) && mb_strpos($title, $qLower) === 0) {
-                $score += $prefixBoost;
+            if (mb_strpos($title, $qLower) === 0) {
+                $score += $this->config['search']['prefix_boost'] ?? 30;
             }
 
-            if ($distance <= $maxDistance || $similarityPct >= $minRatio || !empty($options['is_autocomplete'])) {
-                $matches[] = [
-                    'id' => $node['id'],
-                    'score' => $score,
-                    'node' => $node,
-                ];
-            }
+            $matches[] = [
+                'id' => $node['id'],
+                'score' => $score,
+                'node' => $node,
+            ];
         }
 
-        // sort and limit
+        // Sort and limit
         usort($matches, fn($a, $b) => $b['score'] <=> $a['score']);
-
         $limit = $options['limit'] ?? 20;
         $matches = array_slice($matches, 0, $limit);
 
-        // return format
-        if ($returnFormat === 'nodes') {
-            return array_map(fn($m) => $m['node'], $matches);
-        }
-
-        // default: ids
-        return array_map(fn($m) => $m['id'], $matches);
+        // Return format
+        return ($options['return'] ?? 'ids') === 'nodes'
+            ? array_map(fn($m) => $m['node'], $matches)
+            : array_map(fn($m) => $m['id'], $matches);
     }
+
 
     protected function tokenize(string $text): array
     {
@@ -190,5 +139,54 @@ class JsonSearchDriver implements SearchDriver
             if (mb_strpos($title, $t) === false) return false;
         }
         return true;
+    }
+
+      /**
+     * Damerau–Levenshtein distance with caching.
+     */
+    protected function damerauDistance(string $a, string $b): int
+    {
+        $key = $a.'|'.$b;
+        if (isset(self::$distanceCache[$key])) {
+            return self::$distanceCache[$key];
+        }
+
+        $lenA = strlen($a);
+        $lenB = strlen($b);
+
+        $d = [];
+        $maxDist = $lenA + $lenB;
+
+        for ($i = 0; $i <= $lenA; $i++) {
+            $d[$i] = [];
+            $d[$i][0] = $i;
+        }
+        for ($j = 0; $j <= $lenB; $j++) {
+            $d[0][$j] = $j;
+        }
+
+        for ($i = 1; $i <= $lenA; $i++) {
+            for ($j = 1; $j <= $lenB; $j++) {
+                $cost = ($a[$i - 1] === $b[$j - 1]) ? 0 : 1;
+
+                $d[$i][$j] = min(
+                    $d[$i - 1][$j] + 1,      // deletion
+                    $d[$i][$j - 1] + 1,      // insertion
+                    $d[$i - 1][$j - 1] + $cost // substitution
+                );
+
+                // transposition
+                if ($i > 1 && $j > 1 &&
+                    $a[$i - 1] === $b[$j - 2] &&
+                    $a[$i - 2] === $b[$j - 1]) {
+                    $d[$i][$j] = min(
+                        $d[$i][$j],
+                        $d[$i - 2][$j - 2] + $cost
+                    );
+                }
+            }
+        }
+
+        return self::$distanceCache[$key] = $d[$lenA][$lenB];
     }
 }

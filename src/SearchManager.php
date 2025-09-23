@@ -2,168 +2,83 @@
 
 namespace Tzart\SearchEngine;
 
-use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Arr;
+use Tzart\SearchEngine\Drivers\JsonSearchDriver;
 
 class SearchManager
 {
-    protected $config;
-    protected static $distanceCache = [];
+    protected array $config;
+    protected array $drivers = [];
+    protected string $defaultDriver;
 
-    public function __construct(array $config)
+    public function __construct()
     {
-        $this->config = $config;
+        $this->config = config('search');
+        $this->defaultDriver = $this->config['default'] ?? 'json';
     }
 
     /**
-     * Perform fuzzy search across terms (and categories via embedded ids).
+     * Get driver instance (singleton per type)
      */
-    public function search(string $query, $domainId = null): array
+    public function driver(?string $name = null): JsonSearchDriver
     {
-        $tokens = explode(' ', strtolower($query));
-        $results = [];
+        $name = $name ?? $this->defaultDriver;
 
-        foreach ($tokens as $token) {
-            $phonetic = metaphone($token);
-            $prefix   = substr($phonetic, 0, 2);
-            $tree     = $this->loadShard($domainId, $prefix);
+        if (!isset($this->drivers[$name])) {
+            $driverConfig = $this->config['drivers'][$name] ?? [];
+            $fullConfig = array_merge($this->config, ['driver_config' => $driverConfig]);
 
-            foreach ($tree as $node) {
-                $dist = $this->damerauDistance($token, strtolower($node['t']));
-                if ($dist <= $this->config['search']['fuzzy_threshold']) {
-                    $results[$node['id']] = $node;
-                }
+            switch ($name) {
+                case 'json':
+                    $this->drivers[$name] = new JsonSearchDriver($fullConfig);
+                    break;
 
-                // substring boost (n-grams)
-                if (strlen($token) >= $this->config['search']['substring_min_len'] &&
-                    stripos($node['t'], $token) !== false) {
-                    $results[$node['id']] = $node;
-                }
+                // future drivers: meilisearch, elasticsearch
+                // case 'meilisearch': ...
+                // case 'elasticsearch': ...
+                
+                default:
+                    throw new \InvalidArgumentException("Search driver [$name] not supported.");
             }
         }
 
-        // Hybrid fallback to DB if not enough results
-        if (count($results) < $this->config['search']['min_candidates']) {
-            $extra = $this->dbFallback($query, $domainId);
-            foreach ($extra as $row) {
-                $results[$row['id']] = $row;
-            }
-        }
-
-        return array_values($results);
+        return $this->drivers[$name];
     }
 
     /**
-     * Load shard from filesystem or cache.
+     * Build search index
      */
-    protected function loadShard($domainId, string $prefix): array
+    public function buildIndex(?int $domainId = null): void
     {
-        $cacheKey = "search_shard:" . ($domainId ?? 'global') . ":$prefix";
-
-        // 1. Try in-memory static cache first (fastest).
-        static $shardCache = [];
-        if (isset($shardCache[$cacheKey])) {
-            return $shardCache[$cacheKey];
-        }
-
-        // 2. Try Laravel cache (Redis / file / array).
-        if (Cache::has($cacheKey)) {
-            return $shardCache[$cacheKey] = Cache::get($cacheKey);
-        }
-
-        // 3. Fallback to file.
-        $base = $this->config['search']['tree_path'] . '/' . ($domainId ?? 'global');
-        $path = "$base/{$prefix}.json";
-
-        if (!file_exists($path)) {
-            return $shardCache[$cacheKey] = [];
-        }
-
-        $raw = file_get_contents($path);
-
-        $data = $this->config['search']['use_msgpack']
-            ? msgpack_unpack($raw)
-            : json_decode($raw, true);
-
-        // 4. Store into Laravel cache for future calls.
-        Cache::put($cacheKey, $data, $this->config['search']['cache_ttl'] ?? 3600);
-
-        // 5. Also keep in static cache for same-request hits.
-        return $shardCache[$cacheKey] = $data;
+        $this->driver()->buildIndex($domainId);
     }
 
     /**
-     * Fallback DB query (LIKE search).
+     * Perform search
      */
-    protected function dbFallback(string $query, $domainId): array
+    public function search(string $query, ?int $domainId = null, array $options = []): array
     {
-        $termModel = $this->config['models']['term'];
-        $cols      = $this->config['columns'];
-
-        $q = $termModel::query();
-
-        if ($domainId && $cols['domain_id']) {
-            $q->where($cols['domain_id'], $domainId);
-        }
-
-        $rows = $q->where($cols['term_title'], 'LIKE', "%{$query}%")->get();
-
-        return $rows->map(function ($term) use ($cols) {
-            return [
-                'id' => $term->{$cols['term_id']},
-                't'  => $term->{$cols['term_title']},
-                'y'  => $cols['term_type'] ? $term->{$cols['term_type']} : null,
-                'c'  => $term->categories->pluck($cols['category_id'])->all(),
-                'h'  => metaphone(strtolower($term->{$cols['term_title']})),
-            ];
-        })->all();
+        return $this->driver()->search($query, $domainId, $options);
     }
 
     /**
-     * Damerau–Levenshtein distance with caching.
+     * Perform autocomplete
      */
-    protected function damerauDistance(string $a, string $b): int
+    public function autocomplete(string $query, ?int $domainId = null, array $options = []): array
     {
-        $key = $a.'|'.$b;
-        if (isset(self::$distanceCache[$key])) {
-            return self::$distanceCache[$key];
+        return $this->driver()->autocomplete($query, $domainId, $options);
+    }
+
+    /**
+     * Allow dynamic calls to driver
+     */
+    public function __call($method, $parameters)
+    {
+        $driver = $this->driver();
+        if (method_exists($driver, $method)) {
+            return $driver->$method(...$parameters);
         }
 
-        $lenA = strlen($a);
-        $lenB = strlen($b);
-
-        $d = [];
-        $maxDist = $lenA + $lenB;
-
-        for ($i = 0; $i <= $lenA; $i++) {
-            $d[$i] = [];
-            $d[$i][0] = $i;
-        }
-        for ($j = 0; $j <= $lenB; $j++) {
-            $d[0][$j] = $j;
-        }
-
-        for ($i = 1; $i <= $lenA; $i++) {
-            for ($j = 1; $j <= $lenB; $j++) {
-                $cost = ($a[$i - 1] === $b[$j - 1]) ? 0 : 1;
-
-                $d[$i][$j] = min(
-                    $d[$i - 1][$j] + 1,      // deletion
-                    $d[$i][$j - 1] + 1,      // insertion
-                    $d[$i - 1][$j - 1] + $cost // substitution
-                );
-
-                // transposition
-                if ($i > 1 && $j > 1 &&
-                    $a[$i - 1] === $b[$j - 2] &&
-                    $a[$i - 2] === $b[$j - 1]) {
-                    $d[$i][$j] = min(
-                        $d[$i][$j],
-                        $d[$i - 2][$j - 2] + $cost
-                    );
-                }
-            }
-        }
-
-        return self::$distanceCache[$key] = $d[$lenA][$lenB];
+        throw new \BadMethodCallException("Method [$method] does not exist on SearchManager or driver.");
     }
 }

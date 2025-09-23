@@ -8,6 +8,6 @@ class Search extends Facade
 {
     protected static function getFacadeAccessor()
     {
-        return \Vendor\Search\SearchManager::class;
+        return \Tzart\SearchEngine\SearchManager::class;
     }
 }
