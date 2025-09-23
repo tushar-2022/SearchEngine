@@ -25,7 +25,7 @@ class JsonSearchDriver implements SearchDriver
 
     public function buildIndex(?int $domainId = null): void
     {
-        $builder = new TreeBuilder($this->termModel, $this->columns, $this->searchCfg);
+        $builder = new TreeBuilder($this->config);
         $builder->build($domainId);
     }
 
