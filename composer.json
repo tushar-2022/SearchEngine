@@ -1,13 +1,13 @@
 {
-    "name": "tzar/search-engine",
+    "name": "tzart/search-engine",
     "description": "A JSON-tree based fuzzy search engine for Laravel with multi-domain and category filtering.",
     "keywords": ["laravel", "search", "fuzzy", "autocomplete", "categories", "json"],
     "type": "library",
     "license": "MIT",
     "authors": [
         {
-            "name": "Tzar",
-            "email": "your-email@example.com"
+            "name": "Tzart",
+            "email": "tushar.gupta.iitr2012@gmail.com"
         }
     ],
     "require": {

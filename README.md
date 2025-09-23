@@ -18,7 +18,7 @@ Supports dynamic model/column mapping so you can plug in any Term/Category model
 
 Require the package:
 
-composer require tzar/search-engine
+composer require tzart/search-engine
 
 
 ⚙️ Configuration
