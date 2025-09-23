@@ -1,6 +1,6 @@
 <?php
 
-namespace Tzar\SearchEngine\Contracts;
+namespace Tzart\SearchEngine\Contracts;
 
 interface SearchDriver
 {

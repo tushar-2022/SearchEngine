@@ -1,6 +1,6 @@
 <?php
 
-namespace Tzar\SearchEngine\Facades;
+namespace Tzart\SearchEngine\Facades;
 
 use Illuminate\Support\Facades\Facade;
 

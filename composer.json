@@ -22,10 +22,10 @@
     "extra": {
         "laravel": {
             "providers": [
-                "Tzar\\SearchEngine\\SearchServiceProvider"
+                "Tzart\\SearchEngine\\SearchServiceProvider"
             ],
             "aliases": {
-                "Search": "Tzar\\SearchEngine\\Facades\\Search"
+                "Search": "Tzart\\SearchEngine\\Facades\\Search"
             }
         }
     },

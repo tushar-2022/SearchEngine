@@ -140,4 +140,4 @@ Each branch groups together similar terms:
 
 📜 License
 
-MIT © 2025 — tzar/search-engine
+MIT © 2025 — tzart/search-engine

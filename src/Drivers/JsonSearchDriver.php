@@ -1,9 +1,9 @@
 <?php
 
-namespace Tzar\SearchEngine\Drivers;
+namespace Tzart\SearchEngine\Drivers;
 
-use Tzar\SearchEngine\Contracts\SearchDriver;
-use Tzar\SearchEngine\TreeBuilder;
+use Tzart\SearchEngine\Contracts\SearchDriver;
+use Tzart\SearchEngine\TreeBuilder;
 
 class JsonSearchDriver implements SearchDriver
 {

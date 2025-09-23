@@ -1,8 +1,8 @@
 <?php
 
-namespace Tzar\SearchEngine\Drivers;
+namespace Tzart\SearchEngine\Drivers;
 
-use Tzar\SearchEngine\Contracts\SearchDriver;
+use Tzart\SearchEngine\Contracts\SearchDriver;
 use Meilisearch\Client;
 
 class MeilisearchDriver implements SearchDriver

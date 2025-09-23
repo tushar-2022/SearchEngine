@@ -1,6 +1,6 @@
 <?php
 
-namespace Tzar\SearchEngine;
+namespace Tzart\SearchEngine;
 
 use Illuminate\Support\ServiceProvider;
 
