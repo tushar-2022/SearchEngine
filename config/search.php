@@ -50,6 +50,7 @@ return [
         'substring_boost'   => 20,     // similarity percent added for substring matches
         'prefix_boost'      => 30,     // similarity percent added for prefix/autocomplete
         'return'            => 'ids',  // default return: 'ids' or 'nodes'
+        'use_msgpack'       => true,  // use msgpack format for shards (smaller/faster)
     ],
     /*
     |--------------------------------------------------------------------------

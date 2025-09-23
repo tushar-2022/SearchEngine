@@ -58,7 +58,7 @@ class TreeBuilder
 
         foreach ($shards as $prefix => $nodes) {
             $path = "$basePath/{$prefix}.json";
-            $data = $this->config['search']['use_msgpack'] ? msgpack_pack($nodes) : json_encode($nodes);
+            $data = !empty($this->config['search']['use_msgpack']) ? msgpack_pack($nodes) : json_encode($nodes);
             file_put_contents($path, $data);
         }
 
@@ -77,7 +77,7 @@ class TreeBuilder
         foreach (glob("$basePath/*.json") as $file) {
             $prefix = basename($file, '.json');
             $data = file_get_contents($file);
-            $tree[$prefix] = $this->config['search']['use_msgpack'] ? msgpack_unpack($data) : json_decode($data, true);
+            $tree[$prefix] = !empty($this->config['search']['use_msgpack']) ? msgpack_unpack($data) : json_decode($data, true);
         }
 
         return $tree;
@@ -93,6 +93,6 @@ class TreeBuilder
         if (!file_exists($file)) return [];
 
         $raw = file_get_contents($file);
-        return $this->config['search']['use_msgpack'] ? msgpack_unpack($raw) : json_decode($raw, true);
+        return !empty($this->config['search']['use_msgpack']) ? msgpack_unpack($raw) : json_decode($raw, true);
     }
 }
