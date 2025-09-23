@@ -21,6 +21,6 @@ class SearchServiceProvider extends ServiceProvider
     {
         $this->publishes([
             __DIR__ . '/../config/search.php' => config_path('search.php'),
-        ], 'config');
+        ], 'search-config');
     }
 }
