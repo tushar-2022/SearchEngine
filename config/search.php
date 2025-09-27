@@ -51,6 +51,7 @@ return [
         'prefix_boost'      => 30,     // similarity percent added for prefix/autocomplete
         'return'            => 'ids',  // default return: 'ids' or 'nodes'
         'use_msgpack'       => true,  // use msgpack format for shards (smaller/faster)
+        'word_boost'       => 10,     // global boost added to all results (useful to favor local results)
     ],
     /*
     |--------------------------------------------------------------------------

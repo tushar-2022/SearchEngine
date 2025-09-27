@@ -46,89 +46,98 @@ class JsonSearchDriver implements SearchDriver
 
     protected function performSearch(string $query, ?int $domainId, array $options): array
     {
-        $builder = new TreeBuilder($this->config); // pass full package config
+      $builder = new TreeBuilder($this->config); // pass full package config
 
-        $qLower = mb_strtolower($query);
-        $tokens = preg_split('/\s+/', $qLower, -1, PREG_SPLIT_NO_EMPTY);
+      $qLower = mb_strtolower($query);
+      $tokens = preg_split('/\s+/', $qLower, -1, PREG_SPLIT_NO_EMPTY);
 
-        $baseKeys = [];
-        foreach ($tokens as $tok) {
-            $baseKeys[] = ctype_digit($tok) ? 'N:' . $tok : 'T:' . metaphone($tok);
-        }
-        if (count($tokens) > 1) {
-            $baseKeys[] = 'P:' . metaphone($qLower);
-        }
+      $baseKeys = [];
+      foreach ($tokens as $tok) {
+          $baseKeys[] = ctype_digit($tok) ? 'N:' . $tok : 'T:' . metaphone($tok);
+      }
+      if (count($tokens) > 1) {
+          $baseKeys[] = 'P:' . metaphone($qLower);
+      }
 
-        $candidates = [];
-        $seen = [];
+      $candidates = [];
+      $seen = [];
 
-        // Lazy load shards only for base keys
-        foreach ($baseKeys as $key) {
-            $prefix = substr($key, 0, 2);
-            $shard = $builder->loadShard($domainId, $prefix);
+      // Lazy load shards only for base keys
+      foreach ($baseKeys as $key) {
+          $prefix = substr($key, 0, 2);
+          $shard = $builder->loadShard($domainId, $prefix);
 
-            foreach ($shard as $node) {
-                if (!isset($seen[$node['id']])) {
-                    $seen[$node['id']] = true;
-                    $candidates[] = $node;
-                }
-            }
-        }
+          foreach ($shard as $node) {
+              if (!isset($seen[$node['id']])) {
+                  $seen[$node['id']] = true;
+                  $candidates[] = $node;
+              }
+          }
+      }
 
-        // Fallback if too few candidates
-        $minCandidates = $options['min_candidates'] ?? ($this->config['search']['min_candidates'] ?? 25);
-        if (count($candidates) < $minCandidates) {
-            $allShards = $builder->load($domainId);
-            foreach ($allShards as $shard) {
-                foreach ($shard as $node) {
-                    if (!isset($seen[$node['id']])) {
-                        $seen[$node['id']] = true;
-                        $candidates[] = $node;
-                    }
-                }
-            }
-        }
+      // Fallback if too few candidates
+      $minCandidates = $options['min_candidates'] ?? ($this->config['search']['min_candidates'] ?? 25);
+      if (count($candidates) < $minCandidates) {
+          $allShards = $builder->load($domainId);
+          foreach ($allShards as $shard) {
+              foreach ($shard as $node) {
+                  if (!isset($seen[$node['id']])) {
+                      $seen[$node['id']] = true;
+                      $candidates[] = $node;
+                  }
+              }
+          }
+      }
 
-        // Scoring + extra fields for sorting
-        $matches = [];
-        foreach ($candidates as $node) {
-            $title = mb_strtolower($node['t']);
-            $distance = $this->damerauDistance($qLower, $title);
-            similar_text($qLower, $title, $similarityPct);
+      // Scoring + extra fields for sorting
+      $matches = [];
+      foreach ($candidates as $node) {
+          $title = mb_strtolower($node['t']);
+          $titleWords = preg_split('/\s+/', $title, -1, PREG_SPLIT_NO_EMPTY);
 
-            $score = $similarityPct - ($distance * 5);
+          $distance = $this->damerauDistance($qLower, $title);
+          similar_text($qLower, $title, $similarityPct);
 
-            if (mb_strlen($qLower) >= ($this->config['search']['substring_min_len'] ?? 3) &&
-                mb_strpos($title, $qLower) !== false
-            ) {
-                $score += $this->config['search']['substring_boost'] ?? 20;
-            }
+          $score = $similarityPct - ($distance * 5);
 
-            if (mb_strpos($title, $qLower) === 0) {
-                $score += $this->config['search']['prefix_boost'] ?? 30;
-            }
+          // Substring boost
+          if (mb_strlen($qLower) >= ($this->config['search']['substring_min_len'] ?? 3) &&
+              mb_strpos($title, $qLower) !== false
+          ) {
+              $score += $this->config['search']['substring_boost'] ?? 20;
+          }
 
-            $matches[] = [
-                'id'         => $node['id'],
-                'score'      => $score,
-                'similarity' => $similarityPct,
-                'distance'   => $distance,
-                'node'       => $node,
-            ];
-        }
+          // Prefix boost
+          if (mb_strpos($title, $qLower) === 0) {
+              $score += $this->config['search']['prefix_boost'] ?? 30;
+          }
 
-        // Sort according to user mode
-        $mode = $options['mode'] ?? 'similarity'; // "similarity" | "exact"
-        $matches = $this->sortMatches($matches, $qLower, $mode);
+          // Whole word boost
+          if (in_array($qLower, $titleWords, true)) {
+              $score += $this->config['search']['word_boost'] ?? 50;
+          }
 
-        // Limit
-        $limit = $options['limit'] ?? 20;
-        $matches = array_slice($matches, 0, $limit);
+          $matches[] = [
+              'id'         => $node['id'],
+              'score'      => $score,
+              'similarity' => $similarityPct,
+              'distance'   => $distance,
+              'node'       => $node,
+          ];
+      }
 
-        // Return format
-        return ($options['return'] ?? 'ids') === 'nodes'
-            ? array_map(fn($m) => $m['node'], $matches)
-            : array_map(fn($m) => $m['id'], $matches);
+      // Sort according to user mode
+      $mode = $options['mode'] ?? 'similarity'; // "similarity" | "exact"
+      $matches = $this->sortMatches($matches, $qLower, $mode);
+
+      // Limit
+      $limit = $options['limit'] ?? 20;
+      $matches = array_slice($matches, 0, $limit);
+
+      // Return format
+      return ($options['return'] ?? 'ids') === 'nodes'
+          ? array_map(fn($m) => $m['node'], $matches)
+          : array_map(fn($m) => $m['id'], $matches);
     }
 
     /**
@@ -136,46 +145,64 @@ class JsonSearchDriver implements SearchDriver
      */
     protected function sortMatches(array $matches, string $qLower, string $mode): array
     {
-        if ($mode === 'exact') {
-            usort($matches, function ($a, $b) use ($qLower) {
-                $aTitle = mb_strtolower($a['node']['t']);
-                $bTitle = mb_strtolower($b['node']['t']);
+      if ($mode === 'exact') {
+          usort($matches, function ($a, $b) use ($qLower) {
+              $aTitle = mb_strtolower($a['node']['t']);
+              $bTitle = mb_strtolower($b['node']['t']);
 
-                // Exact match
-                $aExact = ($aTitle === $qLower);
-                $bExact = ($bTitle === $qLower);
-                if ($aExact !== $bExact) {
-                    return $bExact <=> $aExact;
-                }
+              $aWords = preg_split('/\s+/', $aTitle, -1, PREG_SPLIT_NO_EMPTY);
+              $bWords = preg_split('/\s+/', $bTitle, -1, PREG_SPLIT_NO_EMPTY);
 
-                // Prefix match
-                $aPrefix = (mb_strpos($aTitle, $qLower) === 0);
-                $bPrefix = (mb_strpos($bTitle, $qLower) === 0);
-                if ($aPrefix !== $bPrefix) {
-                    return $bPrefix <=> $aPrefix;
-                }
+              $aWordMatch = in_array($qLower, $aWords, true);
+              $bWordMatch = in_array($qLower, $bWords, true);
+              if ($aWordMatch !== $bWordMatch) {
+                  return $bWordMatch <=> $aWordMatch; // word match first
+              }
 
-                // Substring match
-                $aSub = (mb_strpos($aTitle, $qLower) !== false);
-                $bSub = (mb_strpos($bTitle, $qLower) !== false);
-                if ($aSub !== $bSub) {
-                    return $bSub <=> $aSub;
-                }
+              $aExact = ($aTitle === $qLower);
+              $bExact = ($bTitle === $qLower);
+              if ($aExact !== $bExact) {
+                  return $bExact <=> $aExact;
+              }
 
-                // Fall back to similarity
-                return $b['similarity'] <=> $a['similarity'];
-            });
-        } else {
-            // Similarity-first sorting
-            usort($matches, function ($a, $b) {
-                $cmp = $b['similarity'] <=> $a['similarity'];
-                if ($cmp !== 0) return $cmp;
-                return $a['distance'] <=> $b['distance']; // lower distance is better
-            });
-        }
+              $aPrefix = (mb_strpos($aTitle, $qLower) === 0);
+              $bPrefix = (mb_strpos($bTitle, $qLower) === 0);
+              if ($aPrefix !== $bPrefix) {
+                  return $bPrefix <=> $aPrefix;
+              }
 
-        return $matches;
+              $aSub = (mb_strpos($aTitle, $qLower) !== false);
+              $bSub = (mb_strpos($bTitle, $qLower) !== false);
+              if ($aSub !== $bSub) {
+                  return $bSub <=> $aSub;
+              }
+
+              return $b['similarity'] <=> $a['similarity'];
+          });
+      } else {
+          // Similarity-first mode with word-match preference
+          usort($matches, function ($a, $b) use ($qLower) {
+              $aTitle = mb_strtolower($a['node']['t']);
+              $bTitle = mb_strtolower($b['node']['t']);
+              $aWords = preg_split('/\s+/', $aTitle, -1, PREG_SPLIT_NO_EMPTY);
+              $bWords = preg_split('/\s+/', $bTitle, -1, PREG_SPLIT_NO_EMPTY);
+
+              $aWordMatch = in_array($qLower, $aWords, true);
+              $bWordMatch = in_array($qLower, $bWords, true);
+              if ($aWordMatch !== $bWordMatch) {
+                  return $bWordMatch <=> $aWordMatch;
+              }
+
+              $cmp = $b['similarity'] <=> $a['similarity'];
+              if ($cmp !== 0) return $cmp;
+
+              return $a['distance'] <=> $b['distance'];
+          });
+      }
+
+      return $matches;
     }
+
 
 
 
