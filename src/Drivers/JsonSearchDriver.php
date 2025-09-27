@@ -75,7 +75,7 @@ class JsonSearchDriver implements SearchDriver
             }
         }
 
-        // Fallback if too few candidates (optional: scan all shards)
+        // Fallback if too few candidates
         $minCandidates = $options['min_candidates'] ?? ($this->config['search']['min_candidates'] ?? 25);
         if (count($candidates) < $minCandidates) {
             $allShards = $builder->load($domainId);
@@ -89,7 +89,7 @@ class JsonSearchDriver implements SearchDriver
             }
         }
 
-        // Scoring using Damerau-Levenshtein + substring/prefix boosts
+        // Scoring + extra fields for sorting
         $matches = [];
         foreach ($candidates as $node) {
             $title = mb_strtolower($node['t']);
@@ -109,14 +109,19 @@ class JsonSearchDriver implements SearchDriver
             }
 
             $matches[] = [
-                'id' => $node['id'],
-                'score' => $score,
-                'node' => $node,
+                'id'         => $node['id'],
+                'score'      => $score,
+                'similarity' => $similarityPct,
+                'distance'   => $distance,
+                'node'       => $node,
             ];
         }
 
-        // Sort and limit
-        usort($matches, fn($a, $b) => $b['score'] <=> $a['score']);
+        // Sort according to user mode
+        $mode = $options['mode'] ?? 'similarity'; // "similarity" | "exact"
+        $matches = $this->sortMatches($matches, $qLower, $mode);
+
+        // Limit
         $limit = $options['limit'] ?? 20;
         $matches = array_slice($matches, 0, $limit);
 
@@ -125,6 +130,53 @@ class JsonSearchDriver implements SearchDriver
             ? array_map(fn($m) => $m['node'], $matches)
             : array_map(fn($m) => $m['id'], $matches);
     }
+
+    /**
+     * Modular sorting strategy for matches.
+     */
+    protected function sortMatches(array $matches, string $qLower, string $mode): array
+    {
+        if ($mode === 'exact') {
+            usort($matches, function ($a, $b) use ($qLower) {
+                $aTitle = mb_strtolower($a['node']['t']);
+                $bTitle = mb_strtolower($b['node']['t']);
+
+                // Exact match
+                $aExact = ($aTitle === $qLower);
+                $bExact = ($bTitle === $qLower);
+                if ($aExact !== $bExact) {
+                    return $bExact <=> $aExact;
+                }
+
+                // Prefix match
+                $aPrefix = (mb_strpos($aTitle, $qLower) === 0);
+                $bPrefix = (mb_strpos($bTitle, $qLower) === 0);
+                if ($aPrefix !== $bPrefix) {
+                    return $bPrefix <=> $aPrefix;
+                }
+
+                // Substring match
+                $aSub = (mb_strpos($aTitle, $qLower) !== false);
+                $bSub = (mb_strpos($bTitle, $qLower) !== false);
+                if ($aSub !== $bSub) {
+                    return $bSub <=> $aSub;
+                }
+
+                // Fall back to similarity
+                return $b['similarity'] <=> $a['similarity'];
+            });
+        } else {
+            // Similarity-first sorting
+            usort($matches, function ($a, $b) {
+                $cmp = $b['similarity'] <=> $a['similarity'];
+                if ($cmp !== 0) return $cmp;
+                return $a['distance'] <=> $b['distance']; // lower distance is better
+            });
+        }
+
+        return $matches;
+    }
+
 
 
     protected function tokenize(string $text): array
