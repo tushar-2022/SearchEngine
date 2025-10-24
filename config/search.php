@@ -40,19 +40,40 @@ return [
     |--------------------------------------------------------------------------
     */
     'search' => [
-        'fuzzy_threshold'   => 2,      // max levenshtein distance (title vs query)
-        'similarity_ratio'  => 40,     // % threshold from similar_text
-        'tree_path'         => storage_path('app/search/trees'), // path to store tree shards
-        'branch_distance'   => 1,      // levenshtein distance for nearby branch keys
-        'min_candidates'    => 25,     // if fewer candidates, expand to nearby branches
-        'token_mode'        => 'any',  // 'any' or 'all' tokens must be present
-        'substring_min_len' => 3,      // substring boost enabled when query len >= N
-        'substring_boost'   => 20,     // similarity percent added for substring matches
-        'prefix_boost'      => 30,     // similarity percent added for prefix/autocomplete
-        'return'            => 'ids',  // default return: 'ids' or 'nodes'
-        'use_msgpack'       => true,  // use msgpack format for shards (smaller/faster)
-        'word_boost'       => 10,     // global boost added to all results (useful to favor local results)
+      // --- Fuzzy & Similarity Controls ---
+      'fuzzy_threshold'        => 1,    // max allowed edit distance between query and title/token
+      'similarity_ratio'       => 45,   // minimum % match (from similar_text or Jaro-Winkler)
+      'max_len_diff_distance'  => 4,    // skip Levenshtein if word length difference > N
+      'distance_cutoff'        => 3,    // skip results with distance > N (for fuzzy filtering)
+      'branch_distance'        => 1,    // load nearby branches up to this distance
+      'use_fast_distance'      => true, // use Levenshtein+swap heuristic instead of full Damerau
+
+      // --- Token & Candidate Management ---
+      'min_candidates'         => 15,   // fallback to full tree if fewer than this many found
+      'token_mode'             => 'any',// 'any' or 'all' tokens must appear in title
+      'token_cache_limit'      => 2000, // limit for in-memory cache of token scores
+
+      // --- Boost & Weight Tuning ---
+      'substring_min_len'      => 3,    // minimum length for substring boosting
+      'substring_boost'        => 15,   // boost when query appears as substring
+      'prefix_boost'           => 35,   // boost when query matches prefix
+      'word_boost'             => 25,   // boost for full-token match
+      'phrase_boost'           => 30,   // bonus when tokens appear in same order
+      'all_tokens_boost'       => 40,   // extra score when all tokens found
+      'missing_token_penalty'  => -50,  // penalty for missing tokens
+
+      // --- Caching & Storage ---
+      'use_msgpack'            => true, // use msgpack for smaller shard files
+      'tree_path'              => storage_path('app/search/trees'),
+      'cache_ttl'              => 3600, // seconds for shard cache lifespan
+      'in_memory_shard_cache'  => true, // keep shard data cached during request
+
+      // --- Performance & Memory ---
+      'early_exit_threshold'   => 20,   // if cumulative score drops below, stop evaluating
+      'max_comparisons'        => 1000, // hard cap per search (avoid runaway loops)
+      'return'                 => 'ids',// 'ids' (default) or 'nodes'
     ],
+
     /*
     |--------------------------------------------------------------------------
     | Driver Connections
