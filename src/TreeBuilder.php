@@ -24,45 +24,73 @@ class TreeBuilder
      */
     public function build(?int $domainId = null): array
     {
-        $query = $this->termModel::query();
-        if ($domainId && $this->columns['domain_id']) {
-            $query->where($this->columns['domain_id'], $domainId);
-        }
+      $query = $this->termModel::query();
+      if ($domainId && $this->columns['domain_id']) {
+          $query->where($this->columns['domain_id'], $domainId);
+      }
 
-        $terms = $query->with('categories')->get();
-        $shards = [];
+      // $terms = $query->with('categories')->get();
+      // $shards = [];
 
+      // foreach ($terms as $term) {
+      //     $title = $term->{$this->columns['term_title']};
+      //     $id = $term->{$this->columns['term_id']};
+      //     $type = $this->columns['term_type'] ? $term->{$this->columns['term_type']} : null;
+
+      //     $phonetic = metaphone(strtolower($title));
+      //     $prefix = substr($phonetic, 0, 2);
+
+      //     $categories = $term->categories->pluck($this->columns['category_id'] ?? 'id')->all();
+
+      //     $node = [
+      //         'id' => $id,
+      //         't' => $title,
+      //         'y' => $type,
+      //         'c' => $categories,
+      //         'h' => $phonetic,
+      //     ];
+
+      //     $shards[$prefix][] = $node;
+      // }
+      
+      $shards = [];
+      $query->with('categories')->chunk(500, function ($terms) use (&$shards) {
         foreach ($terms as $term) {
-            $title = $term->{$this->columns['term_title']};
-            $id = $term->{$this->columns['term_id']};
-            $type = $this->columns['term_type'] ? $term->{$this->columns['term_type']} : null;
+          $title = $term->{$this->columns['term_title']};
+          $id = $term->{$this->columns['term_id']};
+          $type = $this->columns['term_type'] ? $term->{$this->columns['term_type']} : null;
 
-            $phonetic = metaphone(strtolower($title));
-            $prefix = substr($phonetic, 0, 2);
+          $phonetic = metaphone(strtolower($title));
+          $prefix = substr($phonetic, 0, 2);
 
-            $categories = $term->categories->pluck($this->columns['category_id'] ?? 'id')->all();
+          $categories = $term->categories->pluck($this->columns['category_id'] ?? 'id')->all();
 
-            $node = [
-                'id' => $id,
-                't' => $title,
-                'y' => $type,
-                'c' => $categories,
-                'h' => $phonetic,
-            ];
+          $node = [
+              'id' => $id,
+              't' => $title,
+              'y' => $type,
+              'c' => $categories,
+              'h' => $phonetic,
+          ];
 
-            $shards[$prefix][] = $node;
+          $shards[$prefix][] = $node;
         }
 
-        $basePath = $this->config['search']['tree_path'] . '/' . ($domainId ?? 'global');
-        File::ensureDirectoryExists($basePath);
+        // Optional: free memory between chunks
+        unset($terms);
+      });
 
-        foreach ($shards as $prefix => $nodes) {
-            $path = "$basePath/{$prefix}.json";
-            $data = !empty($this->config['search']['use_msgpack']) ? msgpack_pack($nodes) : json_encode($nodes);
-            file_put_contents($path, $data);
-        }
 
-        return $shards;
+      $basePath = $this->config['search']['tree_path'] . '/' . ($domainId ?? 'global');
+      File::ensureDirectoryExists($basePath);
+
+      foreach ($shards as $prefix => $nodes) {
+        $path = "$basePath/{$prefix}.json";
+        $data = !empty($this->config['search']['use_msgpack']) ? msgpack_pack($nodes) : json_encode($nodes);
+        file_put_contents($path, $data);
+      }
+
+      return $shards;
     }
 
     /**
