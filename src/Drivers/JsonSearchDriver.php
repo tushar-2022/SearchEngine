@@ -204,8 +204,6 @@ class JsonSearchDriver implements SearchDriver
     }
 
 
-
-
     protected function tokenize(string $text): array
     {
         $raw = preg_split('/[^\p{L}\p{N}]+/u', $text, -1, PREG_SPLIT_NO_EMPTY);
