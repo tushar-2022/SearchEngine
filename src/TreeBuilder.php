@@ -52,9 +52,9 @@ class TreeBuilder
 
       //     $shards[$prefix][] = $node;
       // }
-      
+
       $shards = [];
-      $query->with('categories')->chunk(500, function ($terms) use (&$shards) {
+      $query->with('categories')->chunk(300, function ($terms) use (&$shards) {
         foreach ($terms as $term) {
           $title = $term->{$this->columns['term_title']};
           $id = $term->{$this->columns['term_id']};
