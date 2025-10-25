@@ -61,13 +61,13 @@ class JsonSearchDriver implements SearchDriver
           $tokenLens[$t] = strlen($t);
       }
 
-      // Determine shard prefixes to search
+      // Determine shard prefixes
       $prefixes = [];
       foreach ($tokens as $tok) {
           if (ctype_digit($tok)) {
               $prefixes[] = 'N_' . substr($tok, 0, 2);
           } else {
-              $prefixes[] = 'T_' . substr($tokenMetaphones[$tok], 0, 2);
+              $prefixes[] = 'T_' . substr($tokenMetaphones[$tok], 0, 3);
           }
       }
       if (count($tokens) > 1) {
@@ -78,30 +78,29 @@ class JsonSearchDriver implements SearchDriver
       $candidates = [];
       $seenIds = [];
 
-      $basePath = $this->config['search']['tree_path'] . '/' . ($domainId ?? 'global');
-
-      // Load shards line-by-line
+      // --- Load shards using TreeBuilder::loadShard() ---
+      $maxNodesPerShard = $options['max_nodes_per_shard'] ?? null; // optional
       foreach ($prefixes as $prefix) {
-          $file = "$basePath/{$prefix}.json";
-          if (!file_exists($file)) continue;
-
-          $handle = fopen($file, 'r');
-          if (!$handle) continue;
-
-          while (($line = fgets($handle)) !== false) {
-              $node = json_decode($line, true);
-              if (!$node) continue;
-
+          foreach ($builder->loadShard($domainId, $prefix, $maxNodesPerShard) as $node) {
               $id = $node['id'];
               if (isset($seenIds[$id])) continue;
               $seenIds[$id] = true;
-
               $candidates[] = ['id' => $id, 't' => $node['t']];
           }
-          fclose($handle);
       }
 
-      // --- Prefilter: only candidates containing any token
+      // Fallback: load all shards if too few candidates
+      $minCandidates = $options['min_candidates'] ?? ($this->config['search']['min_candidates'] ?? 25);
+      if (count($candidates) < $minCandidates) {
+          foreach ($builder->load($domainId) as $node) {
+              $id = $node['id'];
+              if (isset($seenIds[$id])) continue;
+              $seenIds[$id] = true;
+              $candidates[] = ['id' => $id, 't' => $node['t']];
+          }
+      }
+
+      // --- Prefilter: candidates containing any token ---
       $prefiltered = [];
       foreach ($candidates as $c) {
           $titleLower = mb_strtolower($c['t']);
@@ -115,7 +114,7 @@ class JsonSearchDriver implements SearchDriver
       $candidates = $prefiltered;
       unset($prefiltered);
 
-      // --- Scoring (same as before)
+      // --- Scoring ---
       $useApcu = function_exists('apcu_fetch') && ini_get('apc.enabled');
       static $tokenCacheStatic = [];
       $tokenCache = &$tokenCacheStatic;
@@ -185,8 +184,7 @@ class JsonSearchDriver implements SearchDriver
               if ($distance > $distanceCutoff && $similarityPct < 30) continue;
 
               $score = $similarityPct - ($distance * 6);
-              if ($pos === 0) $score += $prefixBoost;
-              else $score += $substringBoost;
+              $score += ($pos === 0 ? $prefixBoost : $substringBoost);
               $tokenScores[] = $score;
           }
 
@@ -226,10 +224,10 @@ class JsonSearchDriver implements SearchDriver
   }
 
 
-    /**
-     * Improved sortMatches - uses array_multisort for similarity and
-     * a tighter comparator for 'exact' mode.
-     */
+  /**
+   * Improved sortMatches - uses array_multisort for similarity and
+   * a tighter comparator for 'exact' mode.
+   */
   protected function sortMatches(array $matches, string $qLower, string $mode): array
   {
     if ($mode === 'exact') {
