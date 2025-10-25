@@ -20,6 +20,10 @@ return [
         'category' => App\Models\Category::class, // optional, only if using category filters
     ],
 
+    'relations' => [
+        'term_category' => 'categories', // dynamic relation for terms
+    ],
+
     /*
     |--------------------------------------------------------------------------
     | Column mappings (dynamic)
@@ -32,6 +36,7 @@ return [
         'term_title' => 'title', // main searchable column 'title' in given model
         'term_type'  => 'type',      // dynamic column for type (can be null)
         'domain_id'  => 'domain_id', // set null if not used
+        'category_id'=> 'id',       // category primary key (used in relations)
     ],
 
     /*

@@ -154,33 +154,6 @@ class JsonSearchDriver implements SearchDriver
       $maxLenDiffForDistance = $cfg['max_len_diff_distance'] ?? 4;
       $distanceCutoff = $cfg['distance_cutoff'] ?? 4;
 
-
-
-
-      $getTokenCache = function(string $tok, string $titleLower, array $titleWords) use (&$tokenCache, $useApcu) {
-          $key = $tok . '|' . $titleLower;
-          if ($useApcu && ($cached = apcu_fetch($key)) !== false) return $cached;
-          if (isset($tokenCache[$key])) return $tokenCache[$key];
-
-          $bestDist = PHP_INT_MAX;
-          foreach ($titleWords as $w) {
-              if (abs(strlen($tok) - strlen($w)) > 6) continue;
-              $d = levenshtein($tok, $w);
-              if ($d < $bestDist) $bestDist = $d;
-              if ($bestDist === 0) break;
-          }
-          if ($bestDist === PHP_INT_MAX) $bestDist = levenshtein($tok, $titleLower);
-
-          $maxLen = max(1, max(strlen($tok), strlen($titleLower)));
-          $similarityPct = (1 - ($bestDist / $maxLen)) * 100;
-          $result = [$bestDist, $similarityPct];
-
-          if ($useApcu) apcu_store($key, $result, 300);
-          else $tokenCache[$key] = $result;
-
-          return $result;
-      };
-
       foreach ($candidates as $c) {
           $titleLower = $c['t_lower'];
           $titleWords = $c['words'];

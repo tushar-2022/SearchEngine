@@ -10,6 +10,7 @@ class TreeBuilder
     protected string $termModel;
     protected ?string $categoryModel;
     protected array $columns;
+    protected string $categoryRelation;
 
     public function __construct(array $config)
     {
@@ -17,6 +18,7 @@ class TreeBuilder
         $this->termModel = $config['models']['term'];
         $this->categoryModel = $config['models']['category'] ?? null;
         $this->columns = $config['columns'];
+        $this->categoryRelation = $config['relations']['term_category'] ?? 'categories';
     }
 
     /**
@@ -34,13 +36,13 @@ class TreeBuilder
 
         $shards = [];
 
-        $query->with('categories')->chunk(300, function ($terms) use (&$basePath, &$shards) {
+        $query->with($this->categoryRelation)->chunk(300, function ($terms) use (&$basePath, &$shards) {
             foreach ($terms as $term) {
                 $title = $term->{$this->columns['term_title']};
                 $id = $term->{$this->columns['term_id']};
                 $type = $this->columns['term_type'] ? $term->{$this->columns['term_type']} : null;
 
-                $categories = $term->categories->pluck($this->columns['category_id'] ?? 'id')->all();
+                $categories = $term->{$this->categoryRelation}->pluck($this->columns['category_id'] ?? 'id')->all();
 
                 $node = [
                     'id' => $id,
