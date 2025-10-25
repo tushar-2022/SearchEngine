@@ -29,7 +29,7 @@ class TreeBuilder
             $query->where($this->columns['domain_id'], $domainId);
         }
 
-        $basePath = $this->config['search']['tree_path'] . '/' . ($domainId ?? 'global');
+        $basePath = rtrim($this->config['search']['tree_path'], '/') . '/' . ($domainId ?? 'global');
         File::ensureDirectoryExists($basePath);
 
         $shards = [];
@@ -44,21 +44,20 @@ class TreeBuilder
 
                 $node = [
                     'id' => $id,
-                    't' => $title,
-                    'y' => $type,
-                    'c' => $categories,
+                    't'  => $title,
+                    'y'  => $type,
+                    'c'  => $categories,
                 ];
 
-                // Normalize title and split into words
+                // --- Normalize title and split into words ---
                 $cleanTitle = preg_replace('/[^\p{L}\p{N}\s]/u', '', strtolower($title));
-                $words = preg_split('/\s+/', trim($cleanTitle));
+                $words = array_values(array_filter(preg_split('/\s+/', trim($cleanTitle))));
 
+                // --- Single-word shards ---
                 foreach ($words as $word) {
-                    if (!$word) continue;
-
                     if (ctype_digit($word)) {
                         // --- Numeric shard (N:) ---
-                        $prefix = 'N_' . substr($word, 0, 2);
+                        $prefix = strtoupper('N_' . substr($word, 0, 2));
                         $path = "$basePath/{$prefix}.json";
                         file_put_contents($path, json_encode($node) . PHP_EOL, FILE_APPEND);
                         $shards[$prefix] = true;
@@ -66,7 +65,7 @@ class TreeBuilder
                         // --- Text shard (T:) ---
                         $phonetic = metaphone($word);
                         if ($phonetic) {
-                            $prefix = 'T_' . substr($phonetic, 0, 3);
+                            $prefix = strtoupper('T_' . substr($phonetic, 0, 3));
                             $nodeWithPhonetic = $node + ['h' => $phonetic];
                             $path = "$basePath/{$prefix}.json";
                             file_put_contents($path, json_encode($nodeWithPhonetic) . PHP_EOL, FILE_APPEND);
@@ -75,23 +74,47 @@ class TreeBuilder
                     }
                 }
 
-                // --- Phrase-level shard (P:) ---
+                // --- Phrase-level shards (P:) ---
                 if (count($words) > 1) {
-                    $phrasePhonetic = metaphone(implode(' ', $words));
-                    if ($phrasePhonetic) {
-                        $prefix = 'P_' . substr($phrasePhonetic, 0, 3);
+                    $seen = [];
+                    $uniquePairs = [];
+
+                    $count = count($words);
+                    for ($i = 0; $i < $count - 1; $i++) {
+                        for ($j = $i + 1; $j < $count; $j++) {
+                            $pair = "{$words[$i]} {$words[$j]}";
+                            $h = metaphone($pair);
+                            if ($h) {
+                                $prefix = strtoupper('P_' . substr($h, 0, 5));
+                                // Only one entry per prefix
+                                if (!isset($seen[$prefix])) {
+                                    $seen[$prefix] = true;
+                                    $uniquePairs[$prefix] = ['pair' => $pair, 'h' => $h];
+                                }
+                            }
+                        }
+                    }
+
+                    // Write one record per unique pair prefix
+                    foreach ($uniquePairs as $prefix => $info) {
                         $path = "$basePath/{$prefix}.json";
-                        file_put_contents($path, json_encode($node + ['h' => $phrasePhonetic]) . PHP_EOL, FILE_APPEND);
+                        file_put_contents(
+                            $path,
+                            json_encode($node + $info) . PHP_EOL,
+                            FILE_APPEND
+                        );
                         $shards[$prefix] = true;
                     }
                 }
             }
 
-            unset($terms); // free memory
+            unset($terms); // Free memory per chunk
         });
 
-        return array_keys($shards); // returns list of shard prefixes created
+        // Return list of created shard prefixes
+        return array_keys($shards);
     }
+
 
 
     /**

@@ -74,7 +74,7 @@ class JsonSearchDriver implements SearchDriver
       }
       if (count($tokens) > 1) {
           $phrasePhonetic = metaphone($qLower);
-          $prefixes[] = 'P_' . substr($phrasePhonetic, 0, 3);
+          $prefixes[] = 'P_' . substr($phrasePhonetic, 0, 5);
       }
 
       // --- Load candidates from shards ---
@@ -183,36 +183,44 @@ class JsonSearchDriver implements SearchDriver
           $foundTokens = 0;
           $joinedTokens = implode(' ', $tokens);
 
+          // Precompute lookup map for O(1) membership test
+          $titleWordMap = array_flip($titleWords);
+
           foreach ($tokens as $tok) {
               $pos = mb_strpos($titleLower, $tok);
               if ($pos === false) continue;
 
+              $isNumeric = $tokenIsNumeric[$tok] ?? false;
+              $inTitleWords = isset($titleWordMap[$tok]);
+
               // --- numeric exact match ---
-              if ($tokenIsNumeric[$tok] && in_array($tok, $titleWords, true)) {
-                  $tokenScores[] = 120 + $prefixBoost; // boost numeric match heavily
+              if ($isNumeric && $inTitleWords) {
+                  $tokenScores[] = 120 + $prefixBoost; // heavy boost
                   $foundTokens++;
                   continue;
               }
 
-              // --- text scoring ---
-              if (in_array($tok, $titleWords, true)) {
+              // --- text exact match ---
+              if ($inTitleWords) {
                   $score = 100 + $wordBoost + ($pos === 0 ? $prefixBoost : $substringBoost);
                   $tokenScores[] = $score;
                   $foundTokens++;
                   continue;
               }
 
+              // --- prefix match ---
               if ($pos === 0) {
-                  $score = 80 + $prefixBoost;
-                  $tokenScores[] = $score;
+                  $tokenScores[] = 80 + $prefixBoost;
                   continue;
               }
 
+              // --- short-circuit long-distance tokens ---
               if (abs(strlen($tok) - strlen($titleLower)) > $maxLenDiffForDistance) {
                   $tokenScores[] = $substringBoost;
                   continue;
               }
 
+              // --- fuzzy match using cache ---
               [$distance, $similarityPct] = $getTokenCache($tok, $titleLower, $titleWords);
               if ($distance > $distanceCutoff && $similarityPct < 30) continue;
 
@@ -221,34 +229,62 @@ class JsonSearchDriver implements SearchDriver
               $tokenScores[] = $score;
           }
 
+
           if (empty($tokenScores)) continue;
 
+          // Initialize total score accumulator
           $totalScore = 0;
           $count = count($tokenScores);
-          for ($i = 0; $i < $count; $i++) {
-              $tokForWeight = $tokens[min($i, count($tokens) - 1)];
-              $weight = 1 + (1 / (1 + ($tokenLens[$tokForWeight] ?? 1)));
-              $totalScore += $tokenScores[$i] * $weight;
+
+          // Precompute token weights to avoid misalignment
+          $tokenWeights = [];
+          foreach ($tokens as $tok) {
+              // Weight shorter tokens slightly higher (avoiding division by zero)
+              // This gives some preference to shorter words without letting them dominate
+              $tokenWeights[$tok] = 1 + (1 / (1 + ($tokenLens[$tok] ?? 1)));
           }
-          $totalScore /= $count;
 
-          if (mb_strpos($titleLower, $joinedTokens) !== false) $totalScore += 25;
-          if ($this->tokensAllPresent($tokens, $titleLower)) $totalScore += 40;
-          else if ($foundTokens < count($tokens)) $totalScore -= 20;
+          // Compute weighted average of token scores
+          foreach ($tokenScores as $i => $score) {
+              // Get corresponding token safely (handles mismatched arrays)
+              $tok = $tokens[min($i, count($tokens) - 1)];
+              $weight = $tokenWeights[$tok];
+              $totalScore += $score * $weight;
+          }
 
+          // Average the total score
+          $totalScore /= max(1, $count); // prevent division by zero
+
+          // Bonus if all search tokens appear consecutively in the title
+          if (mb_strpos($titleLower, $joinedTokens) !== false) {
+              $totalScore += 25;
+          }
+
+          // Bonus if all individual tokens are present in the title
+          if ($this->tokensAllPresent($tokens, $titleLower)) {
+              $totalScore += 40;
+          } else {
+              // Penalize proportionally for missing tokens rather than flat -20
+              $missingFraction = 1 - ($foundTokens / max(1, count($tokens)));
+              $totalScore -= 20 * $missingFraction;
+          }
+
+          // Clamp the score to a reasonable range to avoid outliers
           $totalScore = max(-100, min(1000, $totalScore));
 
+          // Store the final match result
           $matches[] = [
               'id' => $c['id'],
               'score' => $totalScore,
               'node' => ['id' => $c['id'], 't' => $c['t']],
           ];
+
       }
 
       // Sorting & limit
       $mode = $options['mode'] ?? 'similarity';
       $matches = $this->sortMatches($matches, $qLower, $mode);
-      $limit = $options['limit'] ?? 20;
+      $limit = $options['limit'] ?? 100;
       $matches = array_slice($matches, 0, $limit);
 
       return ($options['return'] ?? 'ids') === 'nodes'
