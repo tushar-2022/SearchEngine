@@ -4,6 +4,8 @@ namespace Tzart\SearchEngine\Drivers;
 
 use Tzart\SearchEngine\Contracts\SearchDriver;
 use Tzart\SearchEngine\TreeBuilder;
+use Tzart\SearchEngine\Helpers\TokenCache;
+
 
 class JsonSearchDriver implements SearchDriver
 {
@@ -152,6 +154,9 @@ class JsonSearchDriver implements SearchDriver
       $maxLenDiffForDistance = $cfg['max_len_diff_distance'] ?? 4;
       $distanceCutoff = $cfg['distance_cutoff'] ?? 4;
 
+
+
+
       $getTokenCache = function(string $tok, string $titleLower, array $titleWords) use (&$tokenCache, $useApcu) {
           $key = $tok . '|' . $titleLower;
           if ($useApcu && ($cached = apcu_fetch($key)) !== false) return $cached;
@@ -221,7 +226,33 @@ class JsonSearchDriver implements SearchDriver
               }
 
               // --- fuzzy match using cache ---
-              [$distance, $similarityPct] = $getTokenCache($tok, $titleLower, $titleWords);
+              $tokenCache = new TokenCache(300); // 5 min TTL
+
+              /*
+                This code uses the TokenCache class to retrieve or compute the similarity between a token ($tok) 
+                and a title ($titleLower) efficiently. The get() method either returns a cached result or executes 
+                the provided callback to calculate it. Inside the callback, the Levenshtein distance is computed 
+                between the token and each word in the title, skipping words with a length difference greater than 6. 
+                The smallest distance found becomes $bestDist. If no close word is found, it compares the token 
+                to the full title. $similarityPct is then calculated as a percentage similarity (1 - distance/maxLength). 
+                The result [$distance, $similarityPct] is cached for future reuse, optimizing repeated computations.
+              */
+              [$distance, $similarityPct] = $tokenCache->get($tok, $titleLower, $titleWords, function($tok, $titleLower, $titleWords) {
+                  $bestDist = PHP_INT_MAX;
+                  foreach ($titleWords as $w) {
+                      if (abs(strlen($tok) - strlen($w)) > 6) continue;
+                      $d = levenshtein($tok, $w);
+                      if ($d < $bestDist) $bestDist = $d;
+                      if ($bestDist === 0) break;
+                  }
+                  if ($bestDist === PHP_INT_MAX) $bestDist = levenshtein($tok, $titleLower);
+
+                  $maxLen = max(1, max(strlen($tok), strlen($titleLower)));
+                  $similarityPct = (1 - ($bestDist / $maxLen)) * 100;
+
+                  return [$bestDist, $similarityPct];
+              });
+
               if ($distance > $distanceCutoff && $similarityPct < 30) continue;
 
               $score = $similarityPct - ($distance * 6);
