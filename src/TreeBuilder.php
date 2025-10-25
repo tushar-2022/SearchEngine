@@ -29,30 +29,6 @@ class TreeBuilder
           $query->where($this->columns['domain_id'], $domainId);
       }
 
-      // $terms = $query->with('categories')->get();
-      // $shards = [];
-
-      // foreach ($terms as $term) {
-      //     $title = $term->{$this->columns['term_title']};
-      //     $id = $term->{$this->columns['term_id']};
-      //     $type = $this->columns['term_type'] ? $term->{$this->columns['term_type']} : null;
-
-      //     $phonetic = metaphone(strtolower($title));
-      //     $prefix = substr($phonetic, 0, 2);
-
-      //     $categories = $term->categories->pluck($this->columns['category_id'] ?? 'id')->all();
-
-      //     $node = [
-      //         'id' => $id,
-      //         't' => $title,
-      //         'y' => $type,
-      //         'c' => $categories,
-      //         'h' => $phonetic,
-      //     ];
-
-      //     $shards[$prefix][] = $node;
-      // }
-
       $shards = [];
       $query->with('categories')->chunk(300, function ($terms) use (&$shards) {
         foreach ($terms as $term) {
@@ -65,15 +41,30 @@ class TreeBuilder
 
           $categories = $term->categories->pluck($this->columns['category_id'] ?? 'id')->all();
 
+          // Split title into words (remove punctuation and extra spaces)
+          $words = preg_split('/\s+/', trim(preg_replace('/[^\p{L}\p{N}\s]/u', '', strtolower($title))));
+
           $node = [
               'id' => $id,
               't' => $title,
               'y' => $type,
               'c' => $categories,
-              'h' => $phonetic,
           ];
 
-          $shards[$prefix][] = $node;
+          // For each word, create a shard entry
+          foreach ($words as $word) {
+              if (empty($word)) {
+                  continue;
+              }
+
+              $phonetic = metaphone($word);
+              $prefix = substr($phonetic, 0, 2);
+
+              // Add full phonetic hash to node (optional per word)
+              $nodeWithPhonetic = $node + ['h' => $phonetic];
+
+              $shards[$prefix][] = $nodeWithPhonetic;
+          }
         }
 
         // Optional: free memory between chunks

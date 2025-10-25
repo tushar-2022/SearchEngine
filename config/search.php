@@ -49,7 +49,7 @@ return [
       'use_fast_distance'      => true, // use Levenshtein+swap heuristic instead of full Damerau
 
       // --- Token & Candidate Management ---
-      'min_candidates'         => 15,   // fallback to full tree if fewer than this many found
+      'min_candidates'         => 5,   // fallback to full tree if fewer than this many found
       'token_mode'             => 'any',// 'any' or 'all' tokens must appear in title
       'token_cache_limit'      => 2000, // limit for in-memory cache of token scores
 
@@ -63,7 +63,7 @@ return [
       'missing_token_penalty'  => -50,  // penalty for missing tokens
 
       // --- Caching & Storage ---
-      'use_msgpack'            => true, // use msgpack for smaller shard files
+      'use_msgpack'            => false, // use msgpack for smaller shard files
       'tree_path'              => storage_path('app/search/trees'),
       'cache_ttl'              => 3600, // seconds for shard cache lifespan
       'in_memory_shard_cache'  => true, // keep shard data cached during request
