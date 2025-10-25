@@ -101,7 +101,7 @@ class TreeBuilder
     public function loadShard(?int $domainId, string $prefix, int $maxNodes = null): iterable
     {
         $basePath = $this->config['search']['tree_path'] . '/' . ($domainId ?? 'global');
-        $file = "$basePath/{$prefix}.json";
+        $file = "$basePath/" . strtoupper($prefix) . ".json";
 
         if (!file_exists($file)) return;
 

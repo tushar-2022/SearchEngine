@@ -53,18 +53,20 @@ class JsonSearchDriver implements SearchDriver
       $tokens = $this->tokenize($qLower);
       if (empty($tokens)) return [];
 
-      // Precompute token metaphones and lengths
+      // Precompute token metaphones, lengths, numeric flags
       $tokenMetaphones = [];
       $tokenLens = [];
+      $tokenIsNumeric = [];
       foreach ($tokens as $t) {
-          $tokenMetaphones[$t] = ctype_digit($t) ? null : metaphone($t);
+          $tokenIsNumeric[$t] = ctype_digit($t);
+          $tokenMetaphones[$t] = $tokenIsNumeric[$t] ? null : metaphone($t);
           $tokenLens[$t] = strlen($t);
       }
 
       // Determine shard prefixes
       $prefixes = [];
       foreach ($tokens as $tok) {
-          if (ctype_digit($tok)) {
+          if ($tokenIsNumeric[$tok]) {
               $prefixes[] = 'N_' . substr($tok, 0, 2);
           } else {
               $prefixes[] = 'T_' . substr($tokenMetaphones[$tok], 0, 3);
@@ -75,17 +77,24 @@ class JsonSearchDriver implements SearchDriver
           $prefixes[] = 'P_' . substr($phrasePhonetic, 0, 3);
       }
 
+      // --- Load candidates from shards ---
       $candidates = [];
       $seenIds = [];
+      $maxNodesPerShard = $options['max_nodes_per_shard'] ?? null;
 
-      // --- Load shards using TreeBuilder::loadShard() ---
-      $maxNodesPerShard = $options['max_nodes_per_shard'] ?? null; // optional
       foreach ($prefixes as $prefix) {
           foreach ($builder->loadShard($domainId, $prefix, $maxNodesPerShard) as $node) {
               $id = $node['id'];
               if (isset($seenIds[$id])) continue;
               $seenIds[$id] = true;
-              $candidates[] = ['id' => $id, 't' => $node['t']];
+              $titleLower = mb_strtolower($node['t']);
+              $titleWords = preg_split('/\s+/u', $titleLower, -1, PREG_SPLIT_NO_EMPTY);
+              $candidates[$id] = [
+                  'id' => $id,
+                  't' => $node['t'],
+                  't_lower' => $titleLower,
+                  'words' => $titleWords,
+              ];
           }
       }
 
@@ -96,22 +105,38 @@ class JsonSearchDriver implements SearchDriver
               $id = $node['id'];
               if (isset($seenIds[$id])) continue;
               $seenIds[$id] = true;
-              $candidates[] = ['id' => $id, 't' => $node['t']];
+              $titleLower = mb_strtolower($node['t']);
+              $titleWords = preg_split('/\s+/u', $titleLower, -1, PREG_SPLIT_NO_EMPTY);
+              $candidates[$id] = [
+                  'id' => $id,
+                  't' => $node['t'],
+                  't_lower' => $titleLower,
+                  'words' => $titleWords,
+              ];
           }
       }
 
-      // --- Prefilter: candidates containing any token ---
+      // --- Prefilter: phonetic-aware for text, exact match for numeric ---
       $prefiltered = [];
       foreach ($candidates as $c) {
-          $titleLower = mb_strtolower($c['t']);
           foreach ($tokens as $tok) {
-              if (mb_strpos($titleLower, $tok) !== false) {
-                  $prefiltered[] = ['id' => $c['id'], 't' => $c['t'], 't_lower' => $titleLower];
-                  break;
+              if ($tokenIsNumeric[$tok]) {
+                  if (in_array($tok, $c['words'], true)) {
+                      $prefiltered[$c['id']] = $c;
+                      break;
+                  }
+              } else {
+                  $tokMeta = $tokenMetaphones[$tok];
+                  foreach ($c['words'] as $w) {
+                      if (metaphone($w) === $tokMeta) {
+                          $prefiltered[$c['id']] = $c;
+                          break 2;
+                      }
+                  }
               }
           }
       }
-      $candidates = $prefiltered;
+      $candidates = array_values($prefiltered);
       unset($prefiltered);
 
       // --- Scoring ---
@@ -129,10 +154,8 @@ class JsonSearchDriver implements SearchDriver
 
       $getTokenCache = function(string $tok, string $titleLower, array $titleWords) use (&$tokenCache, $useApcu) {
           $key = $tok . '|' . $titleLower;
-          if ($useApcu) {
-              $cached = apcu_fetch($key);
-              if ($cached !== false) return $cached;
-          } else if (isset($tokenCache[$key])) return $tokenCache[$key];
+          if ($useApcu && ($cached = apcu_fetch($key)) !== false) return $cached;
+          if (isset($tokenCache[$key])) return $tokenCache[$key];
 
           $bestDist = PHP_INT_MAX;
           foreach ($titleWords as $w) {
@@ -154,8 +177,8 @@ class JsonSearchDriver implements SearchDriver
       };
 
       foreach ($candidates as $c) {
-          $titleLower = $c['t_lower'] ?? mb_strtolower($c['t']);
-          $titleWords = preg_split('/\s+/u', $titleLower, -1, PREG_SPLIT_NO_EMPTY);
+          $titleLower = $c['t_lower'];
+          $titleWords = $c['words'];
           $tokenScores = [];
           $foundTokens = 0;
           $joinedTokens = implode(' ', $tokens);
@@ -164,17 +187,27 @@ class JsonSearchDriver implements SearchDriver
               $pos = mb_strpos($titleLower, $tok);
               if ($pos === false) continue;
 
+              // --- numeric exact match ---
+              if ($tokenIsNumeric[$tok] && in_array($tok, $titleWords, true)) {
+                  $tokenScores[] = 120 + $prefixBoost; // boost numeric match heavily
+                  $foundTokens++;
+                  continue;
+              }
+
+              // --- text scoring ---
               if (in_array($tok, $titleWords, true)) {
                   $score = 100 + $wordBoost + ($pos === 0 ? $prefixBoost : $substringBoost);
                   $tokenScores[] = $score;
                   $foundTokens++;
                   continue;
               }
+
               if ($pos === 0) {
                   $score = 80 + $prefixBoost;
                   $tokenScores[] = $score;
                   continue;
               }
+
               if (abs(strlen($tok) - strlen($titleLower)) > $maxLenDiffForDistance) {
                   $tokenScores[] = $substringBoost;
                   continue;
