@@ -46,230 +46,185 @@ class JsonSearchDriver implements SearchDriver
 
   protected function performSearch(string $query, ?int $domainId, array $options): array
   {
-    $builder = new TreeBuilder($this->config);
+      $builder = new TreeBuilder($this->config);
 
-    // Normalize query once
-    $qLower = mb_strtolower(trim($query));
-    $tokens = $this->tokenize($qLower);
-    if (empty($tokens)) return [];
+      // Normalize query
+      $qLower = mb_strtolower(trim($query));
+      $tokens = $this->tokenize($qLower);
+      if (empty($tokens)) return [];
 
-    // --- Precompute token metaphones and token lengths
-    $tokenMetaphones = [];
-    $tokenLens = [];
-    foreach ($tokens as $t) {
-        $tokenMetaphones[$t] = ctype_digit($t) ? null : metaphone($t);
-        $tokenLens[$t] = strlen($t);
-    }
-
-    // --- Base keys (unchanged logic)
-    $baseKeys = [];
-    foreach ($tokens as $tok) {
-        $baseKeys[] = ctype_digit($tok) ? 'N:' . $tok : 'T:' . $tokenMetaphones[$tok];
-    }
-    if (count($tokens) > 1) {
-        $baseKeys[] = 'P:' . metaphone($qLower);
-    }
-
-    // --- Lazy load shards for base keys (collect minimal node shape)
-    $candidates = [];
-    $seen = [];
-    foreach ($baseKeys as $key) {
-        $prefix = substr($key, 0, 2);
-        $shard  = $builder->loadShard($domainId, $prefix);
-        foreach ($shard as $node) {
-            $id = $node['id'];
-            if (!isset($seen[$id])) {
-                $seen[$id] = true;
-                // keep only fields we need (reduce memory/copycost)
-                $candidates[] = ['id' => $id, 't' => $node['t']];
-            }
-        }
-    }
-
-    // Fallback: load all shards if too few candidates
-    $minCandidates = $options['min_candidates'] ?? ($this->config['search']['min_candidates'] ?? 25);
-    if (count($candidates) < $minCandidates) {
-        foreach ($builder->load($domainId) as $shard) {
-            foreach ($shard as $node) {
-                $id = $node['id'];
-                if (!isset($seen[$id])) {
-                    $seen[$id] = true;
-                    $candidates[] = ['id' => $id, 't' => $node['t']];
-                }
-            }
-        }
-    }
-
-    // --- Prefilter: keep only candidates that contain ANY token (manual loop faster than array_filter closure)
-    $prefiltered = [];
-    foreach ($candidates as $c) {
-        // lowercase title once (mb strtolower to preserve unicode)
-        $titleLower = mb_strtolower($c['t']);
-        foreach ($tokens as $t) {
-            // simple substring check
-            if (mb_strpos($titleLower, $t) !== false) {
-                $prefiltered[] = ['id' => $c['id'], 't' => $c['t'], 't_lower' => $titleLower];
-                break;
-            }
-        }
-    }
-    $candidates = $prefiltered;
-    unset($prefiltered);
-
-    // --- Scoring: caches (APCu when available, otherwise static)
-    $useApcu = function_exists('apcu_fetch') && ini_get('apc.enabled');
-    static $tokenCacheStatic = [];
-    $tokenCache = &$tokenCacheStatic;
-
-    $matches = [];
-
-    // configuration shortcuts
-    $cfg = $this->config['search'] ?? [];
-    $prefixBoost = $cfg['prefix_boost'] ?? 30;
-    $substringBoost = $cfg['substring_boost'] ?? 20;
-    $wordBoost = $cfg['word_boost'] ?? 50;
-    $maxLenDiffForDistance = $cfg['max_len_diff_distance'] ?? 4;
-    $distanceCutoff = $cfg['distance_cutoff'] ?? 4;
-
-    // Helper to fetch/store token->title metrics in cache (APCu or static)
-    $getTokenCache = function(string $tok, string $titleLower, array $titleWords) use (&$tokenCache, $useApcu) {
-      $key = $tok . '|' . $titleLower;
-      if ($useApcu) {
-          $cached = apcu_fetch($key);
-          if ($cached !== false) return $cached;
-      } else {
-          if (isset($tokenCache[$key])) return $tokenCache[$key];
+      // Precompute token metaphones and lengths
+      $tokenMetaphones = [];
+      $tokenLens = [];
+      foreach ($tokens as $t) {
+          $tokenMetaphones[$t] = ctype_digit($t) ? null : metaphone($t);
+          $tokenLens[$t] = strlen($t);
       }
 
-      // compute best word-level levenshtein (compare token against each word)
-      $bestDist = PHP_INT_MAX;
-      foreach ($titleWords as $w) {
-          // small early skip
-          if (abs(strlen($tok) - strlen($w)) > 6) continue;
-          $d = levenshtein($tok, $w);
-          if ($d < $bestDist) $bestDist = $d;
-          if ($bestDist === 0) break;
-      }
-      if ($bestDist === PHP_INT_MAX) $bestDist = levenshtein($tok, $titleLower); // fallback
-
-      // normalized similarity % (cheap)
-      $maxLen = max(1, max(strlen($tok), strlen($titleLower)));
-      $similarityPct = (1 - ($bestDist / $maxLen)) * 100;
-      $result = [$bestDist, $similarityPct];
-
-      if ($useApcu) apcu_store($key, $result, 300);
-      else $tokenCache[$key] = $result;
-
-      return $result;
-    };
-
-    // Iterate candidates
-    foreach ($candidates as $c) {
-      $titleLower = $c['t_lower'] ?? mb_strtolower($c['t']);
-      // split words once
-      $titleWords = preg_split('/\s+/u', $titleLower, -1, PREG_SPLIT_NO_EMPTY);
-      $tokenScores = [];
-      $foundTokens = 0;
-
-      // For phrase check later: cheap
-      $joinedTokens = implode(' ', $tokens);
-
-      // Score each token; short-circuit where possible
+      // Determine shard prefixes to search
+      $prefixes = [];
       foreach ($tokens as $tok) {
-        // cheap substring check (already prefiltered, but double-check per token)
-        $pos = mb_strpos($titleLower, $tok);
-        if ($pos === false) continue;
-
-        // quick strong-match checks: exact equality to a word, or prefix
-        if (in_array($tok, $titleWords, true)) {
-            // exact word match -> high score, skip heavy computation
-            $score = 100 + $wordBoost + ($pos === 0 ? $prefixBoost : $substringBoost);
-            $tokenScores[] = $score;
-            $foundTokens++;
-            continue;
-        }
-        if ($pos === 0) {
-            // prefix match, good enough — skip heavy distance maybe
-            $score = 80 + $prefixBoost;
-            $tokenScores[] = $score;
-            continue;
-        }
-
-        // length heuristic: skip very dissimilar lengths early
-        if (abs(strlen($tok) - strlen($titleLower)) > $maxLenDiffForDistance) {
-            // still give small substring boost
-            $tokenScores[] = $substringBoost;
-            continue;
-        }
-
-        // fetch (or compute) token-title metrics
-        [$distance, $similarityPct] = $getTokenCache($tok, $titleLower, $titleWords);
-
-        // cut off obviously bad matches
-        if ($distance > $distanceCutoff && $similarityPct < 30) {
-            continue;
-        }
-
-        // base token score
-        $score = $similarityPct - ($distance * 6); // heavier penalty per distance (tunable)
-
-        // token-level boost adjustments
-        if ($pos === 0) $score += $prefixBoost;
-        else $score += $substringBoost;
-
-        $tokenScores[] = $score;
-      } // end tokens
-
-      if (empty($tokenScores)) continue;
-
-      // Weighted average (weight shorter tokens a bit higher)
-      $totalScore = 0;
-      $count = count($tokenScores);
-      for ($i = 0; $i < $count; $i++) {
-          // map token index to the matching token: we weight by token length; simpler mapping: use tokenLens
-          $tokForWeight = $tokens[min($i, count($tokens) - 1)];
-          $weight = 1 + (1 / (1 + ($tokenLens[$tokForWeight] ?? 1)));
-          $totalScore += $tokenScores[$i] * $weight;
+          if (ctype_digit($tok)) {
+              $prefixes[] = 'N_' . substr($tok, 0, 2);
+          } else {
+              $prefixes[] = 'T_' . substr($tokenMetaphones[$tok], 0, 2);
+          }
       }
-      $totalScore /= $count;
-
-      // phrase boost: tokens contiguous in title
-      if (mb_strpos($titleLower, $joinedTokens) !== false) {
-          $totalScore += 25;
+      if (count($tokens) > 1) {
+          $phrasePhonetic = metaphone($qLower);
+          $prefixes[] = 'P_' . substr($phrasePhonetic, 0, 3);
       }
 
-      // all tokens present
-      if ($this->tokensAllPresent($tokens, $titleLower)) {
-          $totalScore += 40;
-      } else {
-          // penalty if some tokens were missing
-          if ($foundTokens < count($tokens)) $totalScore -= 20;
+      $candidates = [];
+      $seenIds = [];
+
+      $basePath = $this->config['search']['tree_path'] . '/' . ($domainId ?? 'global');
+
+      // Load shards line-by-line
+      foreach ($prefixes as $prefix) {
+          $file = "$basePath/{$prefix}.json";
+          if (!file_exists($file)) continue;
+
+          $handle = fopen($file, 'r');
+          if (!$handle) continue;
+
+          while (($line = fgets($handle)) !== false) {
+              $node = json_decode($line, true);
+              if (!$node) continue;
+
+              $id = $node['id'];
+              if (isset($seenIds[$id])) continue;
+              $seenIds[$id] = true;
+
+              $candidates[] = ['id' => $id, 't' => $node['t']];
+          }
+          fclose($handle);
       }
 
-      // clamp score to sensible range
-      if ($totalScore < -100) $totalScore = -100;
-      if ($totalScore > 1000) $totalScore = 1000;
+      // --- Prefilter: only candidates containing any token
+      $prefiltered = [];
+      foreach ($candidates as $c) {
+          $titleLower = mb_strtolower($c['t']);
+          foreach ($tokens as $tok) {
+              if (mb_strpos($titleLower, $tok) !== false) {
+                  $prefiltered[] = ['id' => $c['id'], 't' => $c['t'], 't_lower' => $titleLower];
+                  break;
+              }
+          }
+      }
+      $candidates = $prefiltered;
+      unset($prefiltered);
 
-      $matches[] = [
-          'id' => $c['id'],
-          'score' => $totalScore,
-          'node' => ['id' => $c['id'], 't' => $c['t']],
-      ];
-    } // end candidates
+      // --- Scoring (same as before)
+      $useApcu = function_exists('apcu_fetch') && ini_get('apc.enabled');
+      static $tokenCacheStatic = [];
+      $tokenCache = &$tokenCacheStatic;
+      $matches = [];
 
-    // --- Sorting
-    $mode = $options['mode'] ?? 'similarity';
-    $matches = $this->sortMatches($matches, $qLower, $mode);
+      $cfg = $this->config['search'] ?? [];
+      $prefixBoost = $cfg['prefix_boost'] ?? 30;
+      $substringBoost = $cfg['substring_boost'] ?? 20;
+      $wordBoost = $cfg['word_boost'] ?? 50;
+      $maxLenDiffForDistance = $cfg['max_len_diff_distance'] ?? 4;
+      $distanceCutoff = $cfg['distance_cutoff'] ?? 4;
 
-    // --- Limit
-    $limit = $options['limit'] ?? 20;
-    $matches = array_slice($matches, 0, $limit);
+      $getTokenCache = function(string $tok, string $titleLower, array $titleWords) use (&$tokenCache, $useApcu) {
+          $key = $tok . '|' . $titleLower;
+          if ($useApcu) {
+              $cached = apcu_fetch($key);
+              if ($cached !== false) return $cached;
+          } else if (isset($tokenCache[$key])) return $tokenCache[$key];
 
-    // --- Return
-    return ($options['return'] ?? 'ids') === 'nodes'
-        ? array_map(fn($m) => $m['node'], $matches)
-        : array_map(fn($m) => $m['id'], $matches);
+          $bestDist = PHP_INT_MAX;
+          foreach ($titleWords as $w) {
+              if (abs(strlen($tok) - strlen($w)) > 6) continue;
+              $d = levenshtein($tok, $w);
+              if ($d < $bestDist) $bestDist = $d;
+              if ($bestDist === 0) break;
+          }
+          if ($bestDist === PHP_INT_MAX) $bestDist = levenshtein($tok, $titleLower);
+
+          $maxLen = max(1, max(strlen($tok), strlen($titleLower)));
+          $similarityPct = (1 - ($bestDist / $maxLen)) * 100;
+          $result = [$bestDist, $similarityPct];
+
+          if ($useApcu) apcu_store($key, $result, 300);
+          else $tokenCache[$key] = $result;
+
+          return $result;
+      };
+
+      foreach ($candidates as $c) {
+          $titleLower = $c['t_lower'] ?? mb_strtolower($c['t']);
+          $titleWords = preg_split('/\s+/u', $titleLower, -1, PREG_SPLIT_NO_EMPTY);
+          $tokenScores = [];
+          $foundTokens = 0;
+          $joinedTokens = implode(' ', $tokens);
+
+          foreach ($tokens as $tok) {
+              $pos = mb_strpos($titleLower, $tok);
+              if ($pos === false) continue;
+
+              if (in_array($tok, $titleWords, true)) {
+                  $score = 100 + $wordBoost + ($pos === 0 ? $prefixBoost : $substringBoost);
+                  $tokenScores[] = $score;
+                  $foundTokens++;
+                  continue;
+              }
+              if ($pos === 0) {
+                  $score = 80 + $prefixBoost;
+                  $tokenScores[] = $score;
+                  continue;
+              }
+              if (abs(strlen($tok) - strlen($titleLower)) > $maxLenDiffForDistance) {
+                  $tokenScores[] = $substringBoost;
+                  continue;
+              }
+
+              [$distance, $similarityPct] = $getTokenCache($tok, $titleLower, $titleWords);
+              if ($distance > $distanceCutoff && $similarityPct < 30) continue;
+
+              $score = $similarityPct - ($distance * 6);
+              if ($pos === 0) $score += $prefixBoost;
+              else $score += $substringBoost;
+              $tokenScores[] = $score;
+          }
+
+          if (empty($tokenScores)) continue;
+
+          $totalScore = 0;
+          $count = count($tokenScores);
+          for ($i = 0; $i < $count; $i++) {
+              $tokForWeight = $tokens[min($i, count($tokens) - 1)];
+              $weight = 1 + (1 / (1 + ($tokenLens[$tokForWeight] ?? 1)));
+              $totalScore += $tokenScores[$i] * $weight;
+          }
+          $totalScore /= $count;
+
+          if (mb_strpos($titleLower, $joinedTokens) !== false) $totalScore += 25;
+          if ($this->tokensAllPresent($tokens, $titleLower)) $totalScore += 40;
+          else if ($foundTokens < count($tokens)) $totalScore -= 20;
+
+          $totalScore = max(-100, min(1000, $totalScore));
+
+          $matches[] = [
+              'id' => $c['id'],
+              'score' => $totalScore,
+              'node' => ['id' => $c['id'], 't' => $c['t']],
+          ];
+      }
+
+      // Sorting & limit
+      $mode = $options['mode'] ?? 'similarity';
+      $matches = $this->sortMatches($matches, $qLower, $mode);
+      $limit = $options['limit'] ?? 20;
+      $matches = array_slice($matches, 0, $limit);
+
+      return ($options['return'] ?? 'ids') === 'nodes'
+          ? array_map(fn($m) => $m['node'], $matches)
+          : array_map(fn($m) => $m['id'], $matches);
   }
+
 
     /**
      * Improved sortMatches - uses array_multisort for similarity and
