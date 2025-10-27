@@ -51,7 +51,7 @@ class JsonSearchDriver implements SearchDriver
       $builder = new TreeBuilder($this->config);
 
       // Normalize query
-      $qLower = mb_strtolower(trim(string: $query));
+      $qLower = mb_strtolower(trim( $query));
       $tokens = $this->tokenize($qLower);
       if (empty($tokens)) return [];
 
@@ -199,6 +199,7 @@ class JsonSearchDriver implements SearchDriver
 
       $joinedTokens = implode(' ', $tokens);
       
+      $tokenCache = new TokenCache(300);
       foreach ($candidates as $c) {
           $titleLower = $c['t_lower'];
 
