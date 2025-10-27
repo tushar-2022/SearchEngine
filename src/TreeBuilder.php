@@ -52,14 +52,24 @@ class TreeBuilder
                 ];
 
                 // --- Normalize title and split into words ---
-                $cleanTitle = preg_replace('/[^\p{L}\p{N}\s]/u', '', strtolower($title));
+                $cleanTitle = strtolower($title);
+
+                // Insert spaces between numbers followed by letters and vice versa
+                $cleanTitle = preg_replace('/(?<=\d)(?=[\p{L}])/u', ' ', $cleanTitle);
+                $cleanTitle = preg_replace('/(?<=\p{L})(?=\d)/u', ' ', $cleanTitle);
+
+                // Remove other punctuation
+                $cleanTitle = preg_replace('/[^\p{L}\p{N}\s]/u', '', $cleanTitle);
+
                 $words = array_values(array_filter(preg_split('/\s+/', trim($cleanTitle))));
 
                 // --- Single-word shards ---
                 foreach ($words as $word) {
                     if (ctype_digit($word)) {
                         // --- Numeric shard (N:) ---
-                        $prefix = strtoupper('N_' . substr($word, 0, 2));
+                        $number = ltrim($word, '0');
+                        $number = $number === '' ? '0' : $number;
+                        $prefix = strtoupper('N_' . substr($number, 0, 2));
                         $path = "$basePath/{$prefix}.json";
                         file_put_contents($path, json_encode($node) . PHP_EOL, FILE_APPEND);
                         $shards[$prefix] = true;

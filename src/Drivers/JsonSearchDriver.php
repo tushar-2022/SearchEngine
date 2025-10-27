@@ -51,7 +51,7 @@ class JsonSearchDriver implements SearchDriver
       $builder = new TreeBuilder($this->config);
 
       // Normalize query
-      $qLower = mb_strtolower(trim($query));
+      $qLower = mb_strtolower(trim(string: $query));
       $tokens = $this->tokenize($qLower);
       if (empty($tokens)) return [];
 
@@ -90,12 +90,13 @@ class JsonSearchDriver implements SearchDriver
               if (isset($seenIds[$id])) continue;
               $seenIds[$id] = true;
               $titleLower = mb_strtolower($node['t']);
-              $titleWords = preg_split('/\s+/u', $titleLower, -1, PREG_SPLIT_NO_EMPTY);
+              // $titleWords = $this->tokenize($titleLower);
               $candidates[$id] = [
                   'id' => $id,
                   't' => $node['t'],
                   't_lower' => $titleLower,
-                  'words' => $titleWords,
+                  // 'words' => $titleWords,
+                  'phonetic' => $node['h'] ?? null,
               ];
           }
       }
@@ -108,43 +109,85 @@ class JsonSearchDriver implements SearchDriver
               if (isset($seenIds[$id])) continue;
               $seenIds[$id] = true;
               $titleLower = mb_strtolower($node['t']);
-              $titleWords = preg_split('/\s+/u', $titleLower, -1, PREG_SPLIT_NO_EMPTY);
+              // $titleWords = $this->tokenize($titleLower);
               $candidates[$id] = [
                   'id' => $id,
                   't' => $node['t'],
                   't_lower' => $titleLower,
-                  'words' => $titleWords,
+                  // 'words' => $titleWords,
+                  'phonetic' => $node['h'] ?? null,
               ];
           }
       }
 
-      // --- Prefilter: phonetic-aware for text, exact match for numeric ---
+      // --- Prefilter: phonetic-aware for text, exact match for numeric, substring match for text ---
       $prefiltered = [];
+
       foreach ($candidates as $c) {
+          $matchedTokenCount = 0;
+
           foreach ($tokens as $tok) {
               if ($tokenIsNumeric[$tok]) {
+                  // Lazy tokenize words only if needed
+                  if (!isset($c['words'])) {
+                      $c['words'] = $this->tokenize($c['t_lower']);
+                  }
+
+                  // Numeric exact match
                   if (in_array($tok, $c['words'], true)) {
-                      $prefiltered[$c['id']] = $c;
-                      break;
+                      $matchedTokenCount++;
                   }
               } else {
-                  $tokMeta = $tokenMetaphones[$tok];
-                  foreach ($c['words'] as $w) {
-                      if (metaphone($w) === $tokMeta) {
-                          $prefiltered[$c['id']] = $c;
-                          break 2;
+                  $tokMeta = $tokenMetaphones[$tok] ?? null;
+
+                  if (!$tokMeta) continue;
+
+                  $prefixMatched = false;
+
+                  // Full phrase phonetic match
+                  if (isset($c['phonetic']) && str_starts_with($c['phonetic'], $tokMeta)) {
+                      $prefixMatched = true;
+                  } else {
+                      // Lazy per-word metaphone
+                      if (!isset($c['words'])) {
+                          $c['words'] = $this->tokenize($c['t_lower']);
                       }
+                      if (!isset($c['wordMetaphones'])) {
+                          $c['wordMetaphones'] = array_map(fn($w) => metaphone($w), $c['words']);
+                      }
+
+                      // Per-word phonetic prefix match
+                      foreach ($c['wordMetaphones'] as $wMeta) {
+                          if ($wMeta && str_starts_with($wMeta, $tokMeta)) {
+                              $prefixMatched = true;
+                              break;
+                          }
+                      }
+                  }
+
+                  // --- Substring match ---
+                  if (!$prefixMatched && mb_strpos($c['t_lower'], $tok) !== false) {
+                      $prefixMatched = true;
+                  }
+
+                  if ($prefixMatched) {
+                      $matchedTokenCount++;
                   }
               }
           }
+
+          if ($matchedTokenCount > 0) {
+              $c['matchedTokenCount'] = $matchedTokenCount;
+              $prefiltered[$c['id']] = $c;
+          }
       }
+
+
+
       $candidates = array_values($prefiltered);
       unset($prefiltered);
 
       // --- Scoring ---
-      $useApcu = function_exists('apcu_fetch') && ini_get('apc.enabled');
-      static $tokenCacheStatic = [];
-      $tokenCache = &$tokenCacheStatic;
       $matches = [];
 
       $cfg = $this->config['search'] ?? [];
@@ -154,66 +197,50 @@ class JsonSearchDriver implements SearchDriver
       $maxLenDiffForDistance = $cfg['max_len_diff_distance'] ?? 4;
       $distanceCutoff = $cfg['distance_cutoff'] ?? 4;
 
+      $joinedTokens = implode(' ', $tokens);
+      
       foreach ($candidates as $c) {
           $titleLower = $c['t_lower'];
-          $titleWords = $c['words'];
-          $tokenScores = [];
-          $foundTokens = 0;
-          $joinedTokens = implode(' ', $tokens);
 
-          // Precompute lookup map for O(1) membership test
+          // Lazy tokenize if not already done in prefilter
+          $titleWords = $c['words'] ?? $this->tokenize($titleLower);
+          $c['words'] = $titleWords;
+
+          // Precompute per-word metaphones (only once, lazily)
+          $wordMetaphones = $c['wordMetaphones'] ?? array_map(fn($w) => metaphone($w), $titleWords);
+          $c['wordMetaphones'] = $wordMetaphones;
+
+          // Build quick lookup map for exact membership tests
           $titleWordMap = array_flip($titleWords);
+          // Precompute title word lengths once
+          $titleWordLens = array_map('strlen', $titleWords);
+
+          $tokenScores = [];
+          $foundTokens = $c['matchedTokenCount'] ?? 0; // from prefilter
+          
 
           foreach ($tokens as $tok) {
-              $pos = mb_strpos($titleLower, $tok);
-              if ($pos === false) continue;
-
               $isNumeric = $tokenIsNumeric[$tok] ?? false;
               $inTitleWords = isset($titleWordMap[$tok]);
 
               // --- numeric exact match ---
               if ($isNumeric && $inTitleWords) {
-                  $tokenScores[] = 120 + $prefixBoost; // heavy boost
-                  $foundTokens++;
+                  $tokenScores[] = 120 + $prefixBoost;
                   continue;
               }
 
               // --- text exact match ---
               if ($inTitleWords) {
-                  $score = 100 + $wordBoost + ($pos === 0 ? $prefixBoost : $substringBoost);
-                  $tokenScores[] = $score;
-                  $foundTokens++;
+                  $tokenScores[] = 100 + $wordBoost;
                   continue;
               }
 
-              // --- prefix match ---
-              if ($pos === 0) {
-                  $tokenScores[] = 80 + $prefixBoost;
-                  continue;
-              }
-
-              // --- short-circuit long-distance tokens ---
-              if (abs(strlen($tok) - strlen($titleLower)) > $maxLenDiffForDistance) {
-                  $tokenScores[] = $substringBoost;
-                  continue;
-              }
-
-              // --- fuzzy match using cache ---
-              $tokenCache = new TokenCache(300); // 5 min TTL
-
-              /*
-                This code uses the TokenCache class to retrieve or compute the similarity between a token ($tok) 
-                and a title ($titleLower) efficiently. The get() method either returns a cached result or executes 
-                the provided callback to calculate it. Inside the callback, the Levenshtein distance is computed 
-                between the token and each word in the title, skipping words with a length difference greater than 6. 
-                The smallest distance found becomes $bestDist. If no close word is found, it compares the token 
-                to the full title. $similarityPct is then calculated as a percentage similarity (1 - distance/maxLength). 
-                The result [$distance, $similarityPct] is cached for future reuse, optimizing repeated computations.
-              */
-              [$distance, $similarityPct] = $tokenCache->get($tok, $titleLower, $titleWords, function($tok, $titleLower, $titleWords) {
+              $tokLen = $tokenLens[$tok] ?? strlen($tok);
+              // --- fuzzy match using cache (for non-numeric unmatched tokens) ---
+              [$distance, $similarityPct] = $tokenCache->get($tok, $titleLower, $titleWords, function($tok, $titleLower, $titleWords) use ($tokLen, $titleWordLens) {
                   $bestDist = PHP_INT_MAX;
-                  foreach ($titleWords as $w) {
-                      if (abs(strlen($tok) - strlen($w)) > 6) continue;
+                   foreach ($titleWords as $i => $w) {
+                      if (abs($tokLen - $titleWordLens[$i]) > 6) continue; // use precomputed lengths
                       $d = levenshtein($tok, $w);
                       if ($d < $bestDist) $bestDist = $d;
                       if ($bestDist === 0) break;
@@ -229,60 +256,55 @@ class JsonSearchDriver implements SearchDriver
               if ($distance > $distanceCutoff && $similarityPct < 30) continue;
 
               $score = $similarityPct - ($distance * 6);
-              $score += ($pos === 0 ? $prefixBoost : $substringBoost);
               $tokenScores[] = $score;
           }
 
-
           if (empty($tokenScores)) continue;
 
-          // Initialize total score accumulator
-          $totalScore = 0;
-          $count = count($tokenScores);
-
-          // Precompute token weights to avoid misalignment
+          // --- weighted average over per-token scores ---
           $tokenWeights = [];
           foreach ($tokens as $tok) {
-              // Weight shorter tokens slightly higher (avoiding division by zero)
-              // This gives some preference to shorter words without letting them dominate
               $tokenWeights[$tok] = 1 + (1 / (1 + ($tokenLens[$tok] ?? 1)));
           }
 
-          // Compute weighted average of token scores
-          foreach ($tokenScores as $i => $score) {
-              // Get corresponding token safely (handles mismatched arrays)
-              $tok = $tokens[min($i, count($tokens) - 1)];
-              $weight = $tokenWeights[$tok];
-              $totalScore += $score * $weight;
+          $weightedSum = 0;
+          $weightTotal = 0;
+          foreach ($tokens as $i => $tok) {
+              if (!isset($tokenScores[$i])) continue;
+              $w = $tokenWeights[$tok];
+              $weightedSum += $tokenScores[$i] * $w;
+              $weightTotal += $w;
           }
 
-          // Average the total score
-          $totalScore /= max(1, $count); // prevent division by zero
+          $avgTokenScore = $weightedSum / max(1, $weightTotal);
+          $totalScore = $avgTokenScore;
 
-          // Bonus if all search tokens appear consecutively in the title
+          // --- global coverage adjustments ---
+          $totalTokens = count($tokens);
+          $coverageFraction = $foundTokens / max(1, $totalTokens);
+
+          // Prefix coverage boost (from prefilter)
+          if (($c['matchedTokenCount'] ?? 0) > 0) {
+              $totalScore += ($coverageFraction * $prefixBoost);
+          }
+
+          // Bonus if all search tokens appear consecutively
           if (mb_strpos($titleLower, $joinedTokens) !== false) {
               $totalScore += 25;
           }
 
-          // Bonus if all individual tokens are present in the title
-          if ($this->tokensAllPresent($tokens, $titleLower)) {
-              $totalScore += 40;
-          } else {
-              // Penalize proportionally for missing tokens rather than flat -20
-              $missingFraction = 1 - ($foundTokens / max(1, count($tokens)));
-              $totalScore -= 20 * $missingFraction;
-          }
+          // Balanced penalty/reward for token coverage
+          $totalScore += $coverageFraction * 20; // reward for coverage
+          $totalScore -= (1 - $coverageFraction) * 10; // small penalty for missing ones
 
-          // Clamp the score to a reasonable range to avoid outliers
+          // Clamp the final score
           $totalScore = max(-100, min(1000, $totalScore));
 
-          // Store the final match result
           $matches[] = [
               'id' => $c['id'],
               'score' => $totalScore,
               'node' => ['id' => $c['id'], 't' => $c['t']],
           ];
-
       }
 
       // Sorting & limit
@@ -339,13 +361,40 @@ class JsonSearchDriver implements SearchDriver
   /**
    * tokenize() unchanged but cached. Keeps unicode-aware splitting.
    */
+
   protected function tokenize(string $text): array
   {
-    static $cache = [];
-    if (isset($cache[$text])) return $cache[$text];
-    $raw = preg_split('/[^\p{L}\p{N}]+/u', $text, -1, PREG_SPLIT_NO_EMPTY);
-    return $cache[$text] = array_values(array_filter(array_map('mb_strtolower', $raw)));
+      static $cache = [];
+      if (isset($cache[$text])) return $cache[$text];
+
+      // Lowercase and trim
+      $text = mb_strtolower(trim($text));
+
+      // Insert spaces between digits and letters (both directions)
+      $text = preg_replace('/(?<=\d)(?=\p{L})/u', ' ', $text);
+      $text = preg_replace('/(?<=\p{L})(?=\d)/u', ' ', $text);
+
+      // Remove punctuation except whitespace
+      $text = preg_replace('/[^\p{L}\p{N}\s]/u', '', $text);
+
+      // Split on whitespace
+      $tokens = preg_split('/\s+/u', $text, -1, PREG_SPLIT_NO_EMPTY);
+
+      // Normalize tokens: filter junk & remove leading zeros from numeric tokens
+      $tokens = array_map(function ($t) {
+          if (ctype_digit($t)) {
+              return ltrim($t, '0') ?: '0'; // keep '0' if all zeros
+          }
+          return $t;
+      }, $tokens);
+
+      $tokens = array_filter($tokens, function ($t) {
+          return mb_strlen($t) > 1 || ctype_digit($t);
+      });
+
+      return $cache[$text] = array_values($tokens);
   }
+
 
   /**
    * tokensAllPresent unchanged.
