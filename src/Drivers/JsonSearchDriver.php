@@ -46,6 +46,18 @@ class JsonSearchDriver implements SearchDriver
       return $this->performSearch($query, $domainId, $options);
   }
 
+  /**
+   * 2-letter stable hash for distributing nodes into 676 buckets
+   */
+  private function twoLetterHash(string $str): string
+  {
+      $h = crc32($str);
+      $idx = $h % 676; // 26*26
+      $a = intdiv($idx, 26);
+      $b = $idx % 26;
+      return chr(97 + $a) . chr(97 + $b); // aa, ab, ac, ... zz
+  }
+
   protected function performSearch(string $query, ?int $domainId, array $options): array
   {
       $builder = new TreeBuilder($this->config);
@@ -68,15 +80,93 @@ class JsonSearchDriver implements SearchDriver
       // Determine shard prefixes
       $prefixes = [];
       foreach ($tokens as $tok) {
-          if ($tokenIsNumeric[$tok]) {
-              $prefixes[] = 'N_' . substr($tok, 0, 2);
-          } else {
-              $prefixes[] = 'T_' . substr($tokenMetaphones[$tok], 0, 3);
+
+        if ($tokenIsNumeric[$tok]) {
+            // --- Numeric shard directory + file ---
+            $num = ltrim($tok, '0') ?: "0";
+
+            $dirFirst = substr($num, 0, 2);  // directory shard
+            $filePrefix = substr($num, 0, min(strlen($num), 4));
+
+            $prefixes[] = [
+                "dir" => "N/$dirFirst",
+                "file" => "$filePrefix.jsonl"
+            ];
+
+        } else {
+            // --- Text shard ---
+            $h = $tokenMetaphones[$tok];
+            if (!$h) continue;
+
+            $hashPrefix = $this->twoLetterHash($h);         // same as builder
+            $filePrefix = substr($h, 0, 3);
+
+            $prefixes[] = [
+                "dir" => "T/$hashPrefix",
+                "file" => "$filePrefix.jsonl"
+            ];
+        }
+      }
+
+      // -------------------------------
+      //  PHRASE-LEVEL SHARD LOOKUP
+      // -------------------------------
+      $stopWords = ['a','an','the','in','on','of','and','for','to','is','at','with','from','by'];
+
+      // Remove stop words (same as builder)
+      $clean = [];
+      foreach ($tokens as $t) {
+          if (!in_array($t, $stopWords)) {
+              $clean[] = $t;
           }
       }
-      if (count($tokens) > 1) {
-          $phrasePhonetic = metaphone($qLower);
-          $prefixes[] = 'P_' . substr($phrasePhonetic, 0, 5);
+
+      $count = count($clean);
+      if ($count > 1) {
+
+        $seen = [];
+
+        for ($i = 0; $i < $count; $i++) {
+
+          for ($j = $i + 1; $j < $count; $j++) {
+
+            // ---- Canonical order ----
+            $pair = [$clean[$i], $clean[$j]];
+            sort($pair);
+            $canonical = implode(' ', $pair);
+
+            if (isset($seen[$canonical])) continue;
+            $seen[$canonical] = true;
+
+            // ---- Distance → Weight (used by builder) ----
+            $distance = $j - $i;
+            if ($distance === 1) {
+                $weight = 3;
+            } elseif ($distance === 2 || $distance === 3) {
+                $weight = 2;
+            } else {
+                $weight = 1;
+            }
+
+            // ---- Metaphone (same as builder) ----
+            $h = metaphone($canonical);
+            if (!$h) continue;
+
+            // ---- Two-letter hashed directory ----
+            $hashPrefix = $this->twoLetterHash($h);
+
+            // ---- 5-letter file prefix ----
+            $filePrefix = substr($h, 0, 5) . ".jsonl";
+
+            // ---- Store directory + file + weight ----
+            // Search must load using these physical paths
+            $prefixes[] = [
+              "dir"      => "P/$hashPrefix",
+              "file"     => $filePrefix,
+              "weight"   => $weight,
+            ];
+          }
+        }
       }
 
       // --- Load candidates from shards ---
@@ -85,101 +175,100 @@ class JsonSearchDriver implements SearchDriver
       $maxNodesPerShard = $options['max_nodes_per_shard'] ?? null;
 
       foreach ($prefixes as $prefix) {
-          foreach ($builder->loadShard($domainId, $prefix, $maxNodesPerShard) as $node) {
-              $id = $node['id'];
-              if (isset($seenIds[$id])) continue;
-              $seenIds[$id] = true;
-              $titleLower = mb_strtolower($node['t']);
-              // $titleWords = $this->tokenize($titleLower);
-              $candidates[$id] = [
-                  'id' => $id,
-                  't' => $node['t'],
-                  't_lower' => $titleLower,
-                  // 'words' => $titleWords,
-                  'phonetic' => $node['h'] ?? null,
-              ];
-          }
+        foreach ($builder->loadShardRandom($domainId, $prefix, $maxNodesPerShard) as $node) {
+          $id = $node['id'];
+          if (isset($seenIds[$id])) continue;
+          $seenIds[$id] = true;
+          $titleLower = mb_strtolower($node['t']);
+
+          $candidates[$id] = [
+              'id' => $id,
+              't' => $node['t'],
+              't_lower' => $titleLower,
+              'phonetic' => $node['h'] ?? null,
+          ];
+        }
       }
 
-      // Fallback: load all shards if too few candidates
-      $minCandidates = $options['min_candidates'] ?? ($this->config['search']['min_candidates'] ?? 25);
-      if (count($candidates) < $minCandidates) {
-          foreach ($builder->load($domainId) as $node) {
-              $id = $node['id'];
-              if (isset($seenIds[$id])) continue;
-              $seenIds[$id] = true;
-              $titleLower = mb_strtolower($node['t']);
-              // $titleWords = $this->tokenize($titleLower);
-              $candidates[$id] = [
-                  'id' => $id,
-                  't' => $node['t'],
-                  't_lower' => $titleLower,
-                  // 'words' => $titleWords,
-                  'phonetic' => $node['h'] ?? null,
-              ];
-          }
-      }
+      // // Fallback: load all shards if too few candidates
+      // $minCandidates = $options['min_candidates'] ?? ($this->config['search']['min_candidates'] ?? 25);
+      // if (count($candidates) < $minCandidates) {
+      //     foreach ($builder->load($domainId) as $node) {
+      //         $id = $node['id'];
+      //         if (isset($seenIds[$id])) continue;
+      //         $seenIds[$id] = true;
+      //         $titleLower = mb_strtolower($node['t']);
+      //         // $titleWords = $this->tokenize($titleLower);
+      //         $candidates[$id] = [
+      //             'id' => $id,
+      //             't' => $node['t'],
+      //             't_lower' => $titleLower,
+      //             // 'words' => $titleWords,
+      //             'phonetic' => $node['h'] ?? null,
+      //         ];
+      //     }
+      // }
 
       // --- Prefilter: phonetic-aware for text, exact match for numeric, substring match for text ---
       $prefiltered = [];
 
       foreach ($candidates as $c) {
-          $matchedTokenCount = 0;
+        $matchedTokenCount = 0;
 
-          foreach ($tokens as $tok) {
-              if ($tokenIsNumeric[$tok]) {
-                  // Lazy tokenize words only if needed
-                  if (!isset($c['words'])) {
-                      $c['words'] = $this->tokenize($c['t_lower']);
-                  }
+        foreach ($tokens as $tok) {
+            if ($tokenIsNumeric[$tok]) {
+                // Lazy tokenize words only if needed
+                if (!isset($c['words'])) {
+                    $c['words'] = $this->tokenize($c['t_lower']);
+                }
 
-                  // Numeric exact match
-                  if (in_array($tok, $c['words'], true)) {
-                      $matchedTokenCount++;
-                  }
-              } else {
-                  $tokMeta = $tokenMetaphones[$tok] ?? null;
+                // Numeric exact match
+                if (in_array($tok, $c['words'], true)) {
+                    $matchedTokenCount++;
+                }
+            } else {
+                $tokMeta = $tokenMetaphones[$tok] ?? null;
 
-                  if (!$tokMeta) continue;
+                if (!$tokMeta) continue;
 
-                  $prefixMatched = false;
+                $prefixMatched = false;
 
-                  // Full phrase phonetic match
-                  if (isset($c['phonetic']) && str_starts_with($c['phonetic'], $tokMeta)) {
-                      $prefixMatched = true;
-                  } else {
-                      // Lazy per-word metaphone
-                      if (!isset($c['words'])) {
-                          $c['words'] = $this->tokenize($c['t_lower']);
-                      }
-                      if (!isset($c['wordMetaphones'])) {
-                          $c['wordMetaphones'] = array_map(fn($w) => metaphone($w), $c['words']);
-                      }
+                // Full phrase phonetic match
+                if (isset($c['phonetic']) && str_starts_with($c['phonetic'], $tokMeta)) {
+                    $prefixMatched = true;
+                } else {
+                    // Lazy per-word metaphone
+                    if (!isset($c['words'])) {
+                        $c['words'] = $this->tokenize($c['t_lower']);
+                    }
+                    if (!isset($c['wordMetaphones'])) {
+                        $c['wordMetaphones'] = array_map(fn($w) => metaphone($w), $c['words']);
+                    }
 
-                      // Per-word phonetic prefix match
-                      foreach ($c['wordMetaphones'] as $wMeta) {
-                          if ($wMeta && str_starts_with($wMeta, $tokMeta)) {
-                              $prefixMatched = true;
-                              break;
-                          }
-                      }
-                  }
+                    // Per-word phonetic prefix match
+                    foreach ($c['wordMetaphones'] as $wMeta) {
+                        if ($wMeta && str_starts_with($wMeta, $tokMeta)) {
+                            $prefixMatched = true;
+                            break;
+                        }
+                    }
+                }
 
-                  // --- Substring match ---
-                  if (!$prefixMatched && mb_strpos($c['t_lower'], $tok) !== false) {
-                      $prefixMatched = true;
-                  }
+                // --- Substring match ---
+                if (!$prefixMatched && mb_strpos($c['t_lower'], $tok) !== false) {
+                    $prefixMatched = true;
+                }
 
-                  if ($prefixMatched) {
-                      $matchedTokenCount++;
-                  }
-              }
-          }
+                if ($prefixMatched) {
+                    $matchedTokenCount++;
+                }
+            }
+        }
 
-          if ($matchedTokenCount > 0) {
-              $c['matchedTokenCount'] = $matchedTokenCount;
-              $prefiltered[$c['id']] = $c;
-          }
+        if ($matchedTokenCount > 0) {
+            $c['matchedTokenCount'] = $matchedTokenCount;
+            $prefiltered[$c['id']] = $c;
+        }
       }
 
 
